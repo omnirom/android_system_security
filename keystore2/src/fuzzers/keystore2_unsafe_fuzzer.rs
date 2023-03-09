@@ -14,10 +14,9 @@
 
 //! Fuzzes unsafe APIs of libkeystore2 module
 
-#![feature(slice_internals)]
 #![no_main]
 
-use core::slice::memchr;
+use binder::get_declared_instances;
 use keystore2::{legacy_blob::LegacyBlobLoader, utils::ui_opts_2_compat};
 use keystore2_aaid::get_aaid;
 use keystore2_apc_compat::ApcHal;
@@ -28,7 +27,7 @@ use keystore2_crypto::{
     hmac_sha256, parse_subject_from_certificate, Password, ZVec,
 };
 use keystore2_selinux::{check_access, getpidcon, setcon, Backend, Context, KeystoreKeyBackend};
-use keystore2_vintf::{get_aidl_instances, get_hidl_instances};
+use keystore2_vintf::get_hidl_instances;
 use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use std::{ffi::CString, sync::Arc};
 
@@ -37,7 +36,7 @@ const MAX_SIZE_MODIFIER: usize = 1024;
 
 /// CString does not contain any internal 0 bytes
 fn get_valid_cstring_data(data: &[u8]) -> &[u8] {
-    match memchr::memchr(0, data) {
+    match data.iter().position(|&b| b == 0) {
         Some(idx) => &data[0..idx],
         None => data,
     }
@@ -97,7 +96,6 @@ enum FuzzCommand<'a> {
     },
     GetAidlInstances {
         aidl_package: &'a str,
-        version: usize,
         aidl_interface_name: &'a str,
     },
     GetAaid {
@@ -191,8 +189,11 @@ fuzz_target!(|commands: Vec<FuzzCommand>| {
             } => {
                 get_hidl_instances(hidl_package, major_version, minor_version, hidl_interface_name);
             }
-            FuzzCommand::GetAidlInstances { aidl_package, version, aidl_interface_name } => {
-                get_aidl_instances(aidl_package, version, aidl_interface_name);
+            FuzzCommand::GetAidlInstances { aidl_package, aidl_interface_name } => {
+                get_declared_instances(
+                    format!("{}.{}", aidl_package, aidl_interface_name).as_str(),
+                )
+                .unwrap();
             }
             FuzzCommand::GetAaid { aaid_uid } => {
                 let _res = get_aaid(aaid_uid);
