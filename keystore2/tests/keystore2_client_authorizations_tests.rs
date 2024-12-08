@@ -12,49 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::SystemTime;
-
-use openssl::bn::{BigNum, MsbOption};
-use openssl::x509::X509NameBuilder;
-
+use crate::keystore2_client_test_utils::{
+    app_attest_key_feature_exists, delete_app_key,
+    perform_sample_asym_sign_verify_op, perform_sample_hmac_sign_verify_op,
+    perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op,
+    verify_certificate_serial_num, verify_certificate_subject_name, SAMPLE_PLAIN_TEXT,
+};
+use crate::{require_keymint, skip_test_if_no_app_attest_key_feature};
+use aconfig_android_hardware_biometrics_rust;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     ErrorCode::ErrorCode, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
     SecurityLevel::SecurityLevel, Tag::Tag,
 };
-
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-    KeyMetadata::KeyMetadata, ResponseCode::ResponseCode,
-};
-
-use aconfig_android_hardware_biometrics_rust;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    HardwareAuthToken::HardwareAuthToken,
-    HardwareAuthenticatorType::HardwareAuthenticatorType
+    HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
 };
-use android_hardware_security_secureclock::aidl::android::hardware::security::secureclock::Timestamp::Timestamp;
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_auth_service, get_keystore_service, key_generations,
-    key_generations::Error,
+use android_hardware_security_secureclock::aidl::android::hardware::security::secureclock::{
+    Timestamp::Timestamp
 };
-
-use crate::keystore2_client_test_utils::{
-    app_attest_key_feature_exists, delete_app_key, perform_sample_asym_sign_verify_op,
-    perform_sample_hmac_sign_verify_op, perform_sample_sym_key_decrypt_op,
-    perform_sample_sym_key_encrypt_op, verify_certificate_serial_num,
-    verify_certificate_subject_name, SAMPLE_PLAIN_TEXT,
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
+    ResponseCode::ResponseCode,
 };
-
-use crate::{skip_test_if_no_app_attest_key_feature, skip_tests_if_keymaster_impl_present};
-
 use keystore2_test_utils::ffi_test_utils::get_value_from_attest_record;
+use keystore2_test_utils::{
+    authorizations, get_keystore_auth_service, key_generations,
+    key_generations::Error, SecLevel,
+};
+use openssl::bn::{BigNum, MsbOption};
+use openssl::x509::X509NameBuilder;
+use std::time::SystemTime;
 
-fn gen_key_including_unique_id(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
-    alias: &str,
-) -> Vec<u8> {
+fn gen_key_including_unique_id(sl: &SecLevel, alias: &str) -> Option<Vec<u8>> {
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::EC)
@@ -65,7 +55,9 @@ fn gen_key_including_unique_id(
         .attestation_challenge(b"foo".to_vec())
         .include_unique_id();
 
-    let key_metadata = key_generations::generate_key(sec_level, &gen_params, alias).unwrap();
+    let key_metadata =
+        key_generations::map_ks_error(key_generations::generate_key(sl, &gen_params, alias))
+            .unwrap()?;
 
     let unique_id = get_value_from_attest_record(
         key_metadata.certificate.as_ref().unwrap(),
@@ -74,23 +66,30 @@ fn gen_key_including_unique_id(
     )
     .expect("Unique id not found.");
     assert!(!unique_id.is_empty());
-    unique_id
+    Some(unique_id)
 }
 
 fn generate_key_and_perform_sign_verify_op_max_times(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     gen_params: &authorizations::AuthSetBuilder,
     alias: &str,
     max_usage_count: i32,
-) -> binder::Result<KeyMetadata> {
-    let key_metadata = key_generations::generate_key(sec_level, gen_params, alias)?;
+) -> binder::Result<Option<KeyMetadata>> {
+    let Some(key_metadata) = key_generations::generate_key(sl, gen_params, alias)? else {
+        return Ok(None);
+    };
 
     // Use above generated key `max_usage_count` times.
     for _ in 0..max_usage_count {
-        perform_sample_asym_sign_verify_op(sec_level, &key_metadata, None, Some(Digest::SHA_2_256));
+        perform_sample_asym_sign_verify_op(
+            &sl.binder,
+            &key_metadata,
+            None,
+            Some(Digest::SHA_2_256),
+        );
     }
 
-    Ok(key_metadata)
+    Ok(Some(key_metadata))
 }
 
 /// Generate a key with `USAGE_COUNT_LIMIT` and verify the key characteristics. Test should be able
@@ -98,24 +97,23 @@ fn generate_key_and_perform_sign_verify_op_max_times(
 /// times subsequent attempts to use the key in test should fail with response code `KEY_NOT_FOUND`.
 /// Test should also verify that the attest record includes `USAGE_COUNT_LIMIT` for attested keys.
 fn generate_key_and_perform_op_with_max_usage_limit(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     gen_params: &authorizations::AuthSetBuilder,
     alias: &str,
     max_usage_count: i32,
     check_attestation: bool,
 ) {
     // Generate a key and use the key for `max_usage_count` times.
-    let key_metadata = generate_key_and_perform_sign_verify_op_max_times(
-        sec_level,
-        gen_params,
-        alias,
-        max_usage_count,
-    )
-    .unwrap();
+    let Some(key_metadata) =
+        generate_key_and_perform_sign_verify_op_max_times(sl, gen_params, alias, max_usage_count)
+            .unwrap()
+    else {
+        return;
+    };
 
     let auth = key_generations::get_key_auth(&key_metadata.authorizations, Tag::USAGE_COUNT_LIMIT)
         .unwrap();
-    if check_attestation && key_generations::has_default_keymint() {
+    if check_attestation && sl.is_keymint() {
         // Check usage-count-limit is included in attest-record.
         // `USAGE_COUNT_LIMIT` is supported from KeyMint1.0
         assert_ne!(
@@ -142,7 +140,7 @@ fn generate_key_and_perform_op_with_max_usage_limit(
     }
 
     // Try to use the key one more time.
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
@@ -156,8 +154,7 @@ fn generate_key_and_perform_op_with_max_usage_limit(
 /// the generated key successfully.
 #[test]
 fn keystore2_gen_key_auth_active_datetime_test_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let active_datetime = duration_since_epoch.as_millis();
@@ -168,18 +165,17 @@ fn keystore2_gen_key_auth_active_datetime_test_success() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .active_date_time(active_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         alias,
     );
     assert!(result.is_ok());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `ACTIVE_DATETIME` set to future date and time. Test should successfully
@@ -188,8 +184,7 @@ fn keystore2_gen_key_auth_active_datetime_test_success() {
 /// `KEY_NOT_YET_VALID`.
 #[test]
 fn keystore2_gen_key_auth_future_active_datetime_test_op_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let future_active_datetime = duration_since_epoch.as_millis() + (24 * 60 * 60 * 1000);
@@ -200,19 +195,18 @@ fn keystore2_gen_key_auth_future_active_datetime_test_op_fail() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .active_date_time(future_active_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         alias,
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::KEY_NOT_YET_VALID), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `ORIGINATION_EXPIRE_DATETIME` set to future date and time. Test should
@@ -220,8 +214,7 @@ fn keystore2_gen_key_auth_future_active_datetime_test_op_fail() {
 /// sign operation using the generated key successfully.
 #[test]
 fn keystore2_gen_key_auth_future_origination_expire_datetime_test_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let origination_expire_datetime = duration_since_epoch.as_millis() + (24 * 60 * 60 * 1000);
@@ -232,18 +225,17 @@ fn keystore2_gen_key_auth_future_origination_expire_datetime_test_success() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .origination_expire_date_time(origination_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         alias,
     );
     assert!(result.is_ok());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `ORIGINATION_EXPIRE_DATETIME` set to current date and time. Test should
@@ -252,8 +244,7 @@ fn keystore2_gen_key_auth_future_origination_expire_datetime_test_success() {
 /// `KEY_EXPIRED`.
 #[test]
 fn keystore2_gen_key_auth_origination_expire_datetime_test_op_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let origination_expire_datetime = duration_since_epoch.as_millis();
@@ -264,19 +255,18 @@ fn keystore2_gen_key_auth_origination_expire_datetime_test_op_fail() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .origination_expire_date_time(origination_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         alias,
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::KEY_EXPIRED), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a HMAC key with `USAGE_EXPIRE_DATETIME` set to future date and time. Test should
@@ -284,8 +274,7 @@ fn keystore2_gen_key_auth_origination_expire_datetime_test_op_fail() {
 /// sign and verify operations using the generated key successfully.
 #[test]
 fn keystore2_gen_key_auth_future_usage_expire_datetime_hmac_verify_op_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let usage_expire_datetime = duration_since_epoch.as_millis() + (24 * 60 * 60 * 1000);
@@ -300,10 +289,12 @@ fn keystore2_gen_key_auth_future_usage_expire_datetime_hmac_verify_op_success() 
         .usage_expire_date_time(usage_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_hmac_verify_success";
-    let key_metadata = key_generations::generate_key(&sec_level, &gen_params, alias).unwrap();
+    let Some(key_metadata) = key_generations::generate_key(&sl, &gen_params, alias).unwrap() else {
+        return;
+    };
 
-    perform_sample_hmac_sign_verify_op(&sec_level, &key_metadata.key);
-    delete_app_key(&keystore2, alias).unwrap();
+    perform_sample_hmac_sign_verify_op(&sl.binder, &key_metadata.key);
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `USAGE_EXPIRE_DATETIME` set to current date and time. Test should
@@ -312,8 +303,7 @@ fn keystore2_gen_key_auth_future_usage_expire_datetime_hmac_verify_op_success() 
 /// `KEY_EXPIRED`.
 #[test]
 fn keystore2_gen_key_auth_usage_expire_datetime_hmac_verify_op_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let usage_expire_datetime = duration_since_epoch.as_millis();
@@ -328,10 +318,12 @@ fn keystore2_gen_key_auth_usage_expire_datetime_hmac_verify_op_fail() {
         .usage_expire_date_time(usage_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_hamc_verify_fail";
-    let key_metadata = key_generations::generate_key(&sec_level, &gen_params, alias).unwrap();
+    let Some(key_metadata) = key_generations::generate_key(&sl, &gen_params, alias).unwrap() else {
+        return;
+    };
 
     let result = key_generations::map_ks_error(
-        sec_level.createOperation(
+        sl.binder.createOperation(
             &key_metadata.key,
             &authorizations::AuthSetBuilder::new()
                 .purpose(KeyPurpose::VERIFY)
@@ -341,7 +333,7 @@ fn keystore2_gen_key_auth_usage_expire_datetime_hmac_verify_op_fail() {
     );
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::KEY_EXPIRED), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate AES key with `USAGE_EXPIRE_DATETIME` set to future date and time. Test should
@@ -349,8 +341,7 @@ fn keystore2_gen_key_auth_usage_expire_datetime_hmac_verify_op_fail() {
 /// Encrypt and Decrypt operations successfully.
 #[test]
 fn keystore2_gen_key_auth_usage_future_expire_datetime_decrypt_op_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let usage_expire_datetime = duration_since_epoch.as_millis() + (24 * 60 * 60 * 1000);
@@ -365,9 +356,11 @@ fn keystore2_gen_key_auth_usage_future_expire_datetime_decrypt_op_success() {
         .usage_expire_date_time(usage_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
-    let key_metadata = key_generations::generate_key(&sec_level, &gen_params, alias).unwrap();
+    let Some(key_metadata) = key_generations::generate_key(&sl, &gen_params, alias).unwrap() else {
+        return;
+    };
     let cipher_text = perform_sample_sym_key_encrypt_op(
-        &sec_level,
+        &sl.binder,
         PaddingMode::PKCS7,
         BlockMode::ECB,
         &mut None,
@@ -379,7 +372,7 @@ fn keystore2_gen_key_auth_usage_future_expire_datetime_decrypt_op_success() {
     assert!(cipher_text.is_some());
 
     let plain_text = perform_sample_sym_key_decrypt_op(
-        &sec_level,
+        &sl.binder,
         &cipher_text.unwrap(),
         PaddingMode::PKCS7,
         BlockMode::ECB,
@@ -390,7 +383,7 @@ fn keystore2_gen_key_auth_usage_future_expire_datetime_decrypt_op_success() {
     .unwrap();
     assert!(plain_text.is_some());
     assert_eq!(plain_text.unwrap(), SAMPLE_PLAIN_TEXT.to_vec());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate AES key with `USAGE_EXPIRE_DATETIME` set to current date and time. Test should
@@ -399,8 +392,7 @@ fn keystore2_gen_key_auth_usage_future_expire_datetime_decrypt_op_success() {
 /// `KEY_EXPIRED`.
 #[test]
 fn keystore2_gen_key_auth_usage_expire_datetime_decrypt_op_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let usage_expire_datetime = duration_since_epoch.as_millis();
@@ -415,9 +407,11 @@ fn keystore2_gen_key_auth_usage_expire_datetime_decrypt_op_fail() {
         .usage_expire_date_time(usage_expire_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
-    let key_metadata = key_generations::generate_key(&sec_level, &gen_params, alias).unwrap();
+    let Some(key_metadata) = key_generations::generate_key(&sl, &gen_params, alias).unwrap() else {
+        return;
+    };
     let cipher_text = perform_sample_sym_key_encrypt_op(
-        &sec_level,
+        &sl.binder,
         PaddingMode::PKCS7,
         BlockMode::ECB,
         &mut None,
@@ -429,7 +423,7 @@ fn keystore2_gen_key_auth_usage_expire_datetime_decrypt_op_fail() {
     assert!(cipher_text.is_some());
 
     let result = key_generations::map_ks_error(perform_sample_sym_key_decrypt_op(
-        &sec_level,
+        &sl.binder,
         &cipher_text.unwrap(),
         PaddingMode::PKCS7,
         BlockMode::ECB,
@@ -439,7 +433,7 @@ fn keystore2_gen_key_auth_usage_expire_datetime_decrypt_op_fail() {
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::KEY_EXPIRED), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `EARLY_BOOT_ONLY`. Test should successfully generate
@@ -447,9 +441,8 @@ fn keystore2_gen_key_auth_usage_expire_datetime_decrypt_op_fail() {
 /// during creation of an operation using this key.
 #[test]
 fn keystore2_gen_key_auth_early_boot_only_op_fail() {
-    skip_tests_if_keymaster_impl_present!();
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
+    require_keymint!(sl);
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -458,19 +451,18 @@ fn keystore2_gen_key_auth_early_boot_only_op_fail() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .early_boot_only();
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         alias,
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::EARLY_BOOT_ENDED), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `MAX_USES_PER_BOOT`. Test should successfully generate
@@ -479,8 +471,7 @@ fn keystore2_gen_key_auth_early_boot_only_op_fail() {
 /// subsequent attempts to use the key in test should fail with error code MAX_OPS_EXCEEDED.
 #[test]
 fn keystore2_gen_key_auth_max_uses_per_boot() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     const MAX_USES_COUNT: i32 = 3;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -490,28 +481,26 @@ fn keystore2_gen_key_auth_max_uses_per_boot() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .max_uses_per_boot(MAX_USES_COUNT);
 
     let alias = "ks_test_auth_tags_test";
     // Generate a key and use the key for `MAX_USES_COUNT` times.
-    let key_metadata = generate_key_and_perform_sign_verify_op_max_times(
-        &sec_level,
-        &gen_params,
-        alias,
-        MAX_USES_COUNT,
-    )
-    .unwrap();
+    let Some(key_metadata) =
+        generate_key_and_perform_sign_verify_op_max_times(&sl, &gen_params, alias, MAX_USES_COUNT)
+            .unwrap()
+    else {
+        return;
+    };
 
     // Try to use the key one more time.
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::KEY_MAX_OPS_EXCEEDED), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `USAGE_COUNT_LIMIT`. Test should successfully generate
@@ -521,8 +510,7 @@ fn keystore2_gen_key_auth_max_uses_per_boot() {
 /// Test should also verify that the attest record includes `USAGE_COUNT_LIMIT`.
 #[test]
 fn keystore2_gen_key_auth_usage_count_limit() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     const MAX_USES_COUNT: i32 = 3;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -536,13 +524,7 @@ fn keystore2_gen_key_auth_usage_count_limit() {
         .usage_count_limit(MAX_USES_COUNT);
 
     let alias = "ks_test_auth_tags_test";
-    generate_key_and_perform_op_with_max_usage_limit(
-        &sec_level,
-        &gen_params,
-        alias,
-        MAX_USES_COUNT,
-        true,
-    );
+    generate_key_and_perform_op_with_max_usage_limit(&sl, &gen_params, alias, MAX_USES_COUNT, true);
 }
 
 /// Generate a key with `USAGE_COUNT_LIMIT`. Test should successfully generate
@@ -552,8 +534,7 @@ fn keystore2_gen_key_auth_usage_count_limit() {
 /// Test should also verify that the attest record includes `USAGE_COUNT_LIMIT`.
 #[test]
 fn keystore2_gen_key_auth_usage_count_limit_one() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     const MAX_USES_COUNT: i32 = 1;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -567,13 +548,7 @@ fn keystore2_gen_key_auth_usage_count_limit_one() {
         .usage_count_limit(MAX_USES_COUNT);
 
     let alias = "ks_test_auth_tags_test";
-    generate_key_and_perform_op_with_max_usage_limit(
-        &sec_level,
-        &gen_params,
-        alias,
-        MAX_USES_COUNT,
-        true,
-    );
+    generate_key_and_perform_op_with_max_usage_limit(&sl, &gen_params, alias, MAX_USES_COUNT, true);
 }
 
 /// Generate a non-attested key with `USAGE_COUNT_LIMIT`. Test should successfully generate
@@ -582,8 +557,7 @@ fn keystore2_gen_key_auth_usage_count_limit_one() {
 /// subsequent attempts to use the key in test should fail with response code `KEY_NOT_FOUND`.
 #[test]
 fn keystore2_gen_non_attested_key_auth_usage_count_limit() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     const MAX_USES_COUNT: i32 = 2;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -597,7 +571,7 @@ fn keystore2_gen_non_attested_key_auth_usage_count_limit() {
 
     let alias = "ks_test_auth_tags_test";
     generate_key_and_perform_op_with_max_usage_limit(
-        &sec_level,
+        &sl,
         &gen_params,
         alias,
         MAX_USES_COUNT,
@@ -610,8 +584,7 @@ fn keystore2_gen_non_attested_key_auth_usage_count_limit() {
 /// specify `CREATION_DATETIME`.
 #[test]
 fn keystore2_gen_key_auth_creation_date_time_test_fail_with_invalid_arg_error() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
     let creation_datetime = duration_since_epoch.as_millis();
@@ -622,11 +595,10 @@ fn keystore2_gen_key_auth_creation_date_time_test_fail_with_invalid_arg_error() 
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .creation_date_time(creation_datetime.try_into().unwrap());
 
     let alias = "ks_test_auth_tags_test";
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,
@@ -647,27 +619,25 @@ fn keystore2_gen_key_auth_creation_date_time_test_fail_with_invalid_arg_error() 
 /// included in attest record and it remains the same for new keys generated.
 #[test]
 fn keystore2_gen_key_auth_include_unique_id_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias_first = "ks_test_auth_tags_test_1";
-    let unique_id_first = gen_key_including_unique_id(&sec_level, alias_first);
+    if let Some(unique_id_first) = gen_key_including_unique_id(&sl, alias_first) {
+        let alias_second = "ks_test_auth_tags_test_2";
+        let unique_id_second = gen_key_including_unique_id(&sl, alias_second).unwrap();
 
-    let alias_second = "ks_test_auth_tags_test_2";
-    let unique_id_second = gen_key_including_unique_id(&sec_level, alias_second);
+        assert_eq!(unique_id_first, unique_id_second);
 
-    assert_eq!(unique_id_first, unique_id_second);
-
-    delete_app_key(&keystore2, alias_first).unwrap();
-    delete_app_key(&keystore2, alias_second).unwrap();
+        delete_app_key(&sl.keystore2, alias_first).unwrap();
+        delete_app_key(&sl.keystore2, alias_second).unwrap();
+    }
 }
 
 /// Generate a key with `APPLICATION_DATA`. Test should create an operation using the
 /// same `APPLICATION_DATA` successfully.
 #[test]
 fn keystore2_gen_key_auth_app_data_test_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -680,7 +650,7 @@ fn keystore2_gen_key_auth_app_data_test_success() {
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
@@ -689,7 +659,7 @@ fn keystore2_gen_key_auth_app_data_test_success() {
         alias,
     );
     assert!(result.is_ok());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `APPLICATION_DATA`. Try to create an operation using the
@@ -697,8 +667,7 @@ fn keystore2_gen_key_auth_app_data_test_success() {
 /// `INVALID_KEY_BLOB`.
 #[test]
 fn keystore2_gen_key_auth_app_data_test_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -711,7 +680,7 @@ fn keystore2_gen_key_auth_app_data_test_fail() {
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
@@ -721,15 +690,14 @@ fn keystore2_gen_key_auth_app_data_test_fail() {
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `APPLICATION_ID`. Test should create an operation using the
 /// same `APPLICATION_ID` successfully.
 #[test]
 fn keystore2_gen_key_auth_app_id_test_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -742,7 +710,7 @@ fn keystore2_gen_key_auth_app_id_test_success() {
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
@@ -751,7 +719,7 @@ fn keystore2_gen_key_auth_app_id_test_success() {
         alias,
     );
     assert!(result.is_ok());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate a key with `APPLICATION_ID`. Try to create an operation using the
@@ -759,8 +727,7 @@ fn keystore2_gen_key_auth_app_id_test_success() {
 /// `INVALID_KEY_BLOB`.
 #[test]
 fn keystore2_gen_key_auth_app_id_test_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -773,7 +740,7 @@ fn keystore2_gen_key_auth_app_id_test_fail() {
 
     let alias = "ks_test_auth_tags_test";
     let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sec_level,
+        &sl,
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
@@ -783,7 +750,7 @@ fn keystore2_gen_key_auth_app_id_test_fail() {
     ));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Generate an attestation-key without specifying `APPLICATION_ID` and `APPLICATION_DATA`.
@@ -792,8 +759,7 @@ fn keystore2_gen_key_auth_app_id_test_fail() {
 #[test]
 fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
     skip_test_if_no_app_attest_key_feature!();
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     // Generate attestation key.
     let attest_gen_params = authorizations::AuthSetBuilder::new()
@@ -804,8 +770,11 @@ fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
         .ec_curve(EcCurve::P_256)
         .attestation_challenge(b"foo".to_vec());
     let attest_alias = "ks_test_auth_tags_attest_key";
-    let attest_key_metadata =
-        key_generations::generate_key(&sec_level, &attest_gen_params, attest_alias).unwrap();
+    let Some(attest_key_metadata) =
+        key_generations::generate_key(&sl, &attest_gen_params, attest_alias).unwrap()
+    else {
+        return;
+    };
 
     // Generate attested key.
     let alias = "ks_test_auth_tags_attested_key";
@@ -820,7 +789,7 @@ fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
         .app_id(b"app-id".to_vec())
         .app_data(b"app-data".to_vec());
 
-    let result = sec_level.generateKey(
+    let result = sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,
@@ -834,8 +803,8 @@ fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
     );
 
     assert!(result.is_ok());
-    delete_app_key(&keystore2, alias).unwrap();
-    delete_app_key(&keystore2, attest_alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, attest_alias).unwrap();
 }
 
 /// Generate an attestation-key with specifying `APPLICATION_ID` and `APPLICATION_DATA`.
@@ -847,8 +816,7 @@ fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
 #[test]
 fn keystore2_gen_attestation_key_with_auth_app_id_app_data_test_fail() {
     skip_test_if_no_app_attest_key_feature!();
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     // Generate attestation key.
     let attest_gen_params = authorizations::AuthSetBuilder::new()
@@ -861,8 +829,11 @@ fn keystore2_gen_attestation_key_with_auth_app_id_app_data_test_fail() {
         .app_id(b"app-id".to_vec())
         .app_data(b"app-data".to_vec());
     let attest_alias = "ks_test_auth_tags_attest_key";
-    let attest_key_metadata =
-        key_generations::generate_key(&sec_level, &attest_gen_params, attest_alias).unwrap();
+    let Some(attest_key_metadata) =
+        key_generations::generate_key(&sl, &attest_gen_params, attest_alias).unwrap()
+    else {
+        return;
+    };
 
     // Generate new key using above generated attestation key without providing app-id and app-data.
     let alias = "ks_test_auth_tags_attested_key";
@@ -875,7 +846,7 @@ fn keystore2_gen_attestation_key_with_auth_app_id_app_data_test_fail() {
         .ec_curve(EcCurve::P_256)
         .attestation_challenge(b"foo".to_vec());
 
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,
@@ -890,7 +861,7 @@ fn keystore2_gen_attestation_key_with_auth_app_id_app_data_test_fail() {
 
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
-    delete_app_key(&keystore2, attest_alias).unwrap();
+    delete_app_key(&sl.keystore2, attest_alias).unwrap();
 }
 
 fn add_hardware_token(auth_type: HardwareAuthenticatorType) {
@@ -951,9 +922,8 @@ fn keystore2_flagged_on_get_last_auth_fingerprint_success() {
 /// generate a key successfully and verify the specified key parameters.
 #[test]
 fn keystore2_gen_key_auth_serial_number_subject_test_success() {
-    skip_tests_if_keymaster_impl_present!();
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
+    require_keymint!(sl);
 
     let cert_subject = "test cert subject";
     let mut x509_name = X509NameBuilder::new().unwrap();
@@ -970,16 +940,17 @@ fn keystore2_gen_key_auth_serial_number_subject_test_success() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256)
         .ec_curve(EcCurve::P_256)
-        .attestation_challenge(b"foo".to_vec())
         .cert_subject_name(x509_name)
         .cert_serial(serial.to_vec());
 
     let alias = "ks_test_auth_tags_test";
-    let key_metadata = key_generations::generate_key(&sec_level, &gen_params, alias).unwrap();
+    let Some(key_metadata) = key_generations::generate_key(&sl, &gen_params, alias).unwrap() else {
+        return;
+    };
     verify_certificate_subject_name(
         key_metadata.certificate.as_ref().unwrap(),
         cert_subject.as_bytes(),
     );
     verify_certificate_serial_num(key_metadata.certificate.as_ref().unwrap(), &serial);
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }

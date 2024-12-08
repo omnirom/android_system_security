@@ -1,6 +1,9 @@
 {
   "presubmit": [
     {
+      "name": "keystore2_client_tests"
+    },
+    {
       "name": "keystore2_crypto_test"
     },
     {
@@ -30,9 +33,6 @@
   "postsubmit": [
     {
       "name": "CtsKeystorePerformanceTestCases"
-    },
-    {
-      "name": "keystore2_client_tests"
     },
     {
       "name": "librkpd_client.test"

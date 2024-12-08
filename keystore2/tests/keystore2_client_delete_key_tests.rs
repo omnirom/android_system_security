@@ -12,27 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::getuid;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    ErrorCode::ErrorCode, SecurityLevel::SecurityLevel,
-};
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
-
-use keystore2_test_utils::{get_keystore_service, key_generations, key_generations::Error};
+use keystore2_test_utils::{
+    get_keystore_service, key_generations, key_generations::Error, SecLevel,
+};
+use nix::unistd::getuid;
 
 /// Generate a key and delete it using keystore2 service `deleteKey` API. Test should successfully
 /// delete the generated key.
 #[test]
 fn keystore2_delete_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "delete_key_success_key";
 
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -40,10 +37,10 @@ fn keystore2_delete_key_success() {
     )
     .unwrap();
 
-    keystore2.deleteKey(&key_metadata.key).expect("Failed to delete a key.");
+    sl.keystore2.deleteKey(&key_metadata.key).expect("Failed to delete a key.");
 
     // Check wehther deleted key is removed from keystore.
-    let result = key_generations::map_ks_error(keystore2.getKeyEntry(&key_metadata.key));
+    let result = key_generations::map_ks_error(sl.keystore2.getKeyEntry(&key_metadata.key));
     assert!(result.is_err());
     assert_eq!(Error::Rc(ResponseCode::KEY_NOT_FOUND), result.unwrap_err());
 }
@@ -70,12 +67,11 @@ fn keystore2_delete_key_fail() {
 /// `INVALID_ARGUMENT`.
 #[test]
 fn keystore2_delete_key_with_blob_domain_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "delete_key_blob_fail_key";
 
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::BLOB,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias.to_string()),
@@ -83,7 +79,7 @@ fn keystore2_delete_key_with_blob_domain_fail() {
     )
     .unwrap();
 
-    let result = key_generations::map_ks_error(keystore2.deleteKey(&key_metadata.key));
+    let result = key_generations::map_ks_error(sl.keystore2.deleteKey(&key_metadata.key));
     assert!(result.is_err());
     assert_eq!(Error::Rc(ResponseCode::INVALID_ARGUMENT), result.unwrap_err());
 }
@@ -92,12 +88,11 @@ fn keystore2_delete_key_with_blob_domain_fail() {
 /// security level `deleteKey` API. Test should delete the key successfully.
 #[test]
 fn keystore2_delete_key_blob_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "delete_key_blob_success_key";
 
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::BLOB,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias.to_string()),
@@ -105,7 +100,7 @@ fn keystore2_delete_key_blob_success() {
     )
     .unwrap();
 
-    let result = sec_level.deleteKey(&key_metadata.key);
+    let result = sl.binder.deleteKey(&key_metadata.key);
     assert!(result.is_ok());
 }
 
@@ -113,10 +108,9 @@ fn keystore2_delete_key_blob_success() {
 /// key with error code `INVALID_ARGUMENT`.
 #[test]
 fn keystore2_delete_key_fails_with_missing_key_blob() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
-    let result = key_generations::map_ks_error(sec_level.deleteKey(&KeyDescriptor {
+    let result = key_generations::map_ks_error(sl.binder.deleteKey(&KeyDescriptor {
         domain: Domain::BLOB,
         nspace: key_generations::SELINUX_SHELL_NAMESPACE,
         alias: None,
@@ -131,20 +125,14 @@ fn keystore2_delete_key_fails_with_missing_key_blob() {
 /// with error code `INVALID_ARGUMENT`.
 #[test]
 fn keystore2_delete_key_blob_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_delete_keyblob_test_key_{}", getuid());
 
-    let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
-        Domain::APP,
-        -1,
-        Some(alias),
-        None,
-    )
-    .unwrap();
+    let key_metadata =
+        key_generations::generate_ec_p256_signing_key(&sl, Domain::APP, -1, Some(alias), None)
+            .unwrap();
 
-    let result = key_generations::map_ks_error(sec_level.deleteKey(&key_metadata.key));
+    let result = key_generations::map_ks_error(sl.binder.deleteKey(&key_metadata.key));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_ARGUMENT), result.unwrap_err());
 }

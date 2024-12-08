@@ -42,15 +42,15 @@ rust_defaults {
         "libthiserror",
     ],
     static_libs: [
+        "libcppbor",
+        "libkeymaster_portable",
+        "libkeymint_support",
         "libkeystore-engine",
         "libkeystore2_ffi_test_utils",
     ],
     shared_libs: [
-        "android.system.keystore2-V4-ndk",
         "libbase",
         "libcrypto",
-        "libkeymaster_portable",
-        "libkeymint_support",
     ],
 }
 
@@ -59,6 +59,12 @@ rust_library {
     crate_name: "keystore2_test_utils",
     srcs: ["lib.rs"],
     defaults: ["libkeystore2_test_utils_defaults"],
+    static_libs: [
+        // Also include static_libs for the NDK variants so that they are available
+        // for dependencies.
+        "android.system.keystore2-V4-ndk",
+        "android.hardware.security.keymint-V3-ndk",
+    ],
 }
 
 rust_test {
@@ -75,20 +81,22 @@ cc_library_static {
     name: "libkeystore2_ffi_test_utils",
     srcs: ["ffi_test_utils.cpp"],
     defaults: [
-        "keymint_use_latest_hal_aidl_ndk_shared",
-        "keystore2_use_latest_aidl_ndk_shared",
+        "keymint_use_latest_hal_aidl_ndk_static",
+        "keystore2_use_latest_aidl_ndk_static",
     ],
     generated_headers: [
         "cxx-bridge-header",
         "libkeystore2_ffi_test_utils_bridge_header",
     ],
     generated_sources: ["libkeystore2_ffi_test_utils_bridge_code"],
-    static_libs: ["libkeystore-engine"],
+    static_libs: [
+        "libkeymaster_portable",
+        "libkeymint_support",
+        "libkeystore-engine",
+    ],
     shared_libs: [
         "libbase",
         "libcrypto",
-        "libkeymaster_portable",
-        "libkeymint_support",
     ],
 }
 

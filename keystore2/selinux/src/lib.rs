@@ -18,6 +18,7 @@
 //!  * getcon
 //!  * selinux_check_access
 //!  * selabel_lookup for the keystore2_key backend.
+//!
 //! And it provides an owning wrapper around context strings `Context`.
 
 // TODO(b/290018030): Remove this and add proper safety comments.
@@ -25,7 +26,6 @@
 
 use anyhow::Context as AnyhowContext;
 use anyhow::{anyhow, Result};
-use lazy_static::lazy_static;
 pub use selinux::pid_t;
 use selinux::SELABEL_CTX_ANDROID_KEYSTORE2_KEY;
 use selinux::SELINUX_CB_LOG;
@@ -41,15 +41,13 @@ use std::sync;
 
 static SELINUX_LOG_INIT: sync::Once = sync::Once::new();
 
-lazy_static! {
-    /// `selinux_check_access` is only thread safe if avc_init was called with lock callbacks.
-    /// However, avc_init is deprecated and not exported by androids version of libselinux.
-    /// `selinux_set_callbacks` does not allow setting lock callbacks. So the only option
-    /// that remains right now is to put a big lock around calls into libselinux.
-    /// TODO b/188079221 It should suffice to protect `selinux_check_access` but until we are
-    /// certain of that, we leave the extra locks in place
-    static ref LIB_SELINUX_LOCK: sync::Mutex<()> = Default::default();
-}
+/// `selinux_check_access` is only thread safe if avc_init was called with lock callbacks.
+/// However, avc_init is deprecated and not exported by androids version of libselinux.
+/// `selinux_set_callbacks` does not allow setting lock callbacks. So the only option
+/// that remains right now is to put a big lock around calls into libselinux.
+/// TODO b/188079221 It should suffice to protect `selinux_check_access` but until we are
+/// certain of that, we leave the extra locks in place
+static LIB_SELINUX_LOCK: sync::Mutex<()> = sync::Mutex::new(());
 
 fn redirect_selinux_logs_to_logcat() {
     // `selinux_set_callback` assigns the static lifetime function pointer

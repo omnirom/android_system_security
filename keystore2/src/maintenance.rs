@@ -22,19 +22,22 @@ use crate::globals::get_keymint_device;
 use crate::globals::{DB, LEGACY_IMPORTER, SUPER_KEY};
 use crate::ks_err;
 use crate::permission::{KeyPerm, KeystorePerm};
-use crate::super_key::{SuperKeyManager, UserState};
+use crate::super_key::SuperKeyManager;
 use crate::utils::{
-    check_get_app_uids_affected_by_sid_permissions, check_key_permission,
+    check_dump_permission, check_get_app_uids_affected_by_sid_permissions, check_key_permission,
     check_keystore_permission, uid_to_android_user, watchdog as wd,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
+    ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
 };
 use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::{
     BnKeystoreMaintenance, IKeystoreMaintenance,
 };
 use android_security_maintenance::binder::{
     BinderFeatures, Interface, Result as BinderResult, Strong, ThreadState,
+};
+use android_security_metrics::aidl::android::security::metrics::{
+    KeystoreAtomPayload::KeystoreAtomPayload::StorageStats
 };
 use android_system_keystore2::aidl::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use android_system_keystore2::aidl::android::system::keystore2::ResponseCode::ResponseCode;
@@ -67,40 +70,6 @@ impl Maintenance {
             Self { delete_listener },
             BinderFeatures { set_requesting_sid: true, ..BinderFeatures::default() },
         ))
-    }
-
-    fn on_user_password_changed(user_id: i32, password: Option<Password>) -> Result<()> {
-        // Check permission. Function should return if this failed. Therefore having '?' at the end
-        // is very important.
-        check_keystore_permission(KeystorePerm::ChangePassword).context(ks_err!())?;
-
-        let mut skm = SUPER_KEY.write().unwrap();
-
-        if let Some(pw) = password.as_ref() {
-            DB.with(|db| {
-                skm.unlock_unlocked_device_required_keys(&mut db.borrow_mut(), user_id as u32, pw)
-            })
-            .context(ks_err!("unlock_unlocked_device_required_keys failed"))?;
-        }
-
-        if let UserState::BeforeFirstUnlock = DB
-            .with(|db| skm.get_user_state(&mut db.borrow_mut(), &LEGACY_IMPORTER, user_id as u32))
-            .context(ks_err!("Could not get user state while changing password!"))?
-        {
-            // Error - password can not be changed when the device is locked
-            return Err(Error::Rc(ResponseCode::LOCKED)).context(ks_err!("Device is locked."));
-        }
-
-        DB.with(|db| match password {
-            Some(pass) => {
-                skm.init_user(&mut db.borrow_mut(), &LEGACY_IMPORTER, user_id as u32, &pass)
-            }
-            None => {
-                // User transitioned to swipe.
-                skm.reset_user(&mut db.borrow_mut(), &LEGACY_IMPORTER, user_id as u32)
-            }
-        })
-        .context(ks_err!("Failed to change user password!"))
     }
 
     fn add_or_remove_user(&self, user_id: i32) -> Result<()> {
@@ -177,9 +146,7 @@ impl Maintenance {
         let (km_dev, _, _) =
             get_keymint_device(&sec_level).context(ks_err!("getting keymint device"))?;
 
-        let _wp = wd::watch_millis_with("In call_with_watchdog", 500, move || {
-            format!("Seclevel: {:?} Op: {}", sec_level, name)
-        });
+        let _wp = wd::watch_millis_with("Maintenance::call_with_watchdog", 500, (sec_level, name));
         map_km_error(op(km_dev)).with_context(|| ks_err!("calling {}", name))?;
         Ok(())
     }
@@ -200,12 +167,21 @@ impl Maintenance {
                     name,
                     &sec_level_string
                 ),
-                Err(ref e) => log::error!(
-                    "Call to {} failed for security level {}: {}.",
-                    name,
-                    &sec_level_string,
-                    e
-                ),
+                Err(ref e) => {
+                    if *sec_level == SecurityLevel::STRONGBOX
+                        && e.downcast_ref::<Error>()
+                            == Some(&Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
+                    {
+                        log::info!("Call to {} failed for StrongBox as it is not available", name,)
+                    } else {
+                        log::error!(
+                            "Call to {} failed for security level {}: {}.",
+                            name,
+                            &sec_level_string,
+                            e
+                        )
+                    }
+                }
             }
             curr_result
         })
@@ -291,22 +267,86 @@ impl Maintenance {
         DB.with(|db| db.borrow_mut().get_app_uids_affected_by_sid(user_id, secure_user_id))
             .context(ks_err!("Failed to get app UIDs affected by SID"))
     }
+
+    fn dump_state(&self, f: &mut dyn std::io::Write) -> std::io::Result<()> {
+        writeln!(f, "keystore2 running")?;
+        writeln!(f)?;
+
+        // Display underlying device information
+        for sec_level in &[SecurityLevel::TRUSTED_ENVIRONMENT, SecurityLevel::STRONGBOX] {
+            let Ok((_dev, hw_info, uuid)) = get_keymint_device(sec_level) else { continue };
+
+            writeln!(f, "Device info for {sec_level:?} with {uuid:?}")?;
+            writeln!(f, "  HAL version:              {}", hw_info.versionNumber)?;
+            writeln!(f, "  Implementation name:      {}", hw_info.keyMintName)?;
+            writeln!(f, "  Implementation author:    {}", hw_info.keyMintAuthorName)?;
+            writeln!(f, "  Timestamp token required: {}", hw_info.timestampTokenRequired)?;
+        }
+        writeln!(f)?;
+
+        // Display database size information.
+        match crate::metrics_store::pull_storage_stats() {
+            Ok(atoms) => {
+                writeln!(f, "Database size information (in bytes):")?;
+                for atom in atoms {
+                    if let StorageStats(stats) = &atom.payload {
+                        let stype = format!("{:?}", stats.storage_type);
+                        if stats.unused_size == 0 {
+                            writeln!(f, "  {:<40}: {:>12}", stype, stats.size)?;
+                        } else {
+                            writeln!(
+                                f,
+                                "  {:<40}: {:>12} (unused {})",
+                                stype, stats.size, stats.unused_size
+                            )?;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                writeln!(f, "Failed to retrieve storage stats: {e:?}")?;
+            }
+        }
+        writeln!(f)?;
+
+        // Display accumulated metrics.
+        writeln!(f, "Metrics information:")?;
+        writeln!(f)?;
+        write!(f, "{:?}", *crate::metrics_store::METRICS_STORE)?;
+        writeln!(f)?;
+
+        // Reminder: any additional information added to the `dump_state()` output needs to be
+        // careful not to include confidential information (e.g. key material).
+
+        Ok(())
+    }
 }
 
-impl Interface for Maintenance {}
+impl Interface for Maintenance {
+    fn dump(
+        &self,
+        f: &mut dyn std::io::Write,
+        _args: &[&std::ffi::CStr],
+    ) -> Result<(), binder::StatusCode> {
+        if !keystore2_flags::enable_dump() {
+            log::info!("skipping dump() as flag not enabled");
+            return Ok(());
+        }
+        log::info!("dump()");
+        let _wp = wd::watch("IKeystoreMaintenance::dump");
+        check_dump_permission().map_err(|_e| {
+            log::error!("dump permission denied");
+            binder::StatusCode::PERMISSION_DENIED
+        })?;
+
+        self.dump_state(f).map_err(|e| {
+            log::error!("dump_state failed: {e:?}");
+            binder::StatusCode::UNKNOWN_ERROR
+        })
+    }
+}
 
 impl IKeystoreMaintenance for Maintenance {
-    fn onUserPasswordChanged(&self, user_id: i32, password: Option<&[u8]>) -> BinderResult<()> {
-        log::info!(
-            "onUserPasswordChanged(user={}, password.is_some()={})",
-            user_id,
-            password.is_some()
-        );
-        let _wp = wd::watch("IKeystoreMaintenance::onUserPasswordChanged");
-        Self::on_user_password_changed(user_id, password.map(|pw| pw.into()))
-            .map_err(into_logged_binder)
-    }
-
     fn onUserAdded(&self, user_id: i32) -> BinderResult<()> {
         log::info!("onUserAdded(user={user_id})");
         let _wp = wd::watch("IKeystoreMaintenance::onUserAdded");
@@ -360,7 +400,7 @@ impl IKeystoreMaintenance for Maintenance {
     }
 
     fn deleteAllKeys(&self) -> BinderResult<()> {
-        log::warn!("deleteAllKeys()");
+        log::warn!("deleteAllKeys() invoked, indicating initial setup or post-factory reset");
         let _wp = wd::watch("IKeystoreMaintenance::deleteAllKeys");
         Self::delete_all_keys().map_err(into_logged_binder)
     }

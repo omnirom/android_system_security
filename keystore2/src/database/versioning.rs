@@ -15,7 +15,7 @@
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
-pub fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> {
+fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> {
     tx.execute(
         "CREATE TABLE IF NOT EXISTS persistent.version (
                 id INTEGER PRIMARY KEY,
@@ -61,7 +61,7 @@ pub fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u
     Ok(version)
 }
 
-pub fn update_version(tx: &Transaction, new_version: u32) -> Result<()> {
+fn update_version(tx: &Transaction, new_version: u32) -> Result<()> {
     let updated = tx
         .execute("UPDATE persistent.version SET version = ? WHERE id = 0;", params![new_version])
         .context("In update_version: Failed to update row.")?;

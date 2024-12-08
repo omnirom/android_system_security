@@ -12,12 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    BlockMode::BlockMode, Digest::Digest, ErrorCode::ErrorCode,
+    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
+    Tag::Tag,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    CreateOperationResponse::CreateOperationResponse, Domain::Domain,
+    IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+    IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
+    KeyParameters::KeyParameters, ResponseCode::ResponseCode,
+};
+use binder::wait_for_interface;
+use keystore2_test_utils::{
+    authorizations, key_generations, key_generations::Error, run_as, SecLevel,
+};
 use nix::unistd::{Gid, Uid};
-use serde::{Deserialize, Serialize};
-
-use std::path::PathBuf;
-use std::process::{Command, Output};
-
 use openssl::bn::BigNum;
 use openssl::encrypt::Encrypter;
 use openssl::error::ErrorStack;
@@ -28,26 +38,9 @@ use openssl::pkey::Public;
 use openssl::rsa::Padding;
 use openssl::sign::Verifier;
 use openssl::x509::X509;
-
-use binder::wait_for_interface;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    BlockMode::BlockMode, Digest::Digest, ErrorCode::ErrorCode,
-    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
-    SecurityLevel::SecurityLevel, Tag::Tag,
-};
-use android_system_keystore2::aidl::android::system::keystore2::{
-    CreateOperationResponse::CreateOperationResponse, Domain::Domain,
-    IKeystoreOperation::IKeystoreOperation, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-    IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
-    KeyParameters::KeyParameters, ResponseCode::ResponseCode,
-};
-
 use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error, run_as,
-};
+use serde::{Deserialize, Serialize};
+use std::process::{Command, Output};
 
 /// This enum is used to communicate between parent and child processes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,8 +63,9 @@ pub struct ForcedOp(pub bool);
 pub const SAMPLE_PLAIN_TEXT: &[u8] = b"my message 11111";
 
 pub const PACKAGE_MANAGER_NATIVE_SERVICE: &str = "package_native";
-pub const APP_ATTEST_KEY_FEATURE: &str = "android.hardware.keystore.app_attest_key";
-pub const DEVICE_ID_ATTESTATION_FEATURE: &str = "android.software.device_id_attestation";
+const APP_ATTEST_KEY_FEATURE: &str = "android.hardware.keystore.app_attest_key";
+const DEVICE_ID_ATTESTATION_FEATURE: &str = "android.software.device_id_attestation";
+const STRONGBOX_KEYSTORE_FEATURE: &str = "android.hardware.strongbox_keystore";
 
 /// Determines whether app_attest_key_feature is supported or not.
 pub fn app_attest_key_feature_exists() -> bool {
@@ -89,6 +83,15 @@ pub fn device_id_attestation_feature_exists() -> bool {
     pm.hasSystemFeature(DEVICE_ID_ATTESTATION_FEATURE, 0).expect("hasSystemFeature failed.")
 }
 
+/// Determines whether device-unique attestation might be supported by StrongBox.
+pub fn skip_device_unique_attestation_tests() -> bool {
+    let pm = wait_for_interface::<dyn IPackageManagerNative>(PACKAGE_MANAGER_NATIVE_SERVICE)
+        .expect("Failed to get package manager native service.");
+
+    // Device unique attestation was first included in Keymaster 4.1.
+    !pm.hasSystemFeature(STRONGBOX_KEYSTORE_FEATURE, 41).expect("hasSystemFeature failed.")
+}
+
 /// Determines whether to skip device id attestation tests on GSI build with API level < 34.
 pub fn skip_device_id_attest_tests() -> bool {
     // b/298586194, there are some devices launched with Android T, and they will be receiving
@@ -96,10 +99,7 @@ pub fn skip_device_id_attest_tests() -> bool {
     // (ro.product.*_for_attestation) reading logic would not be available for such devices
     // hence skipping this test for such scenario.
 
-    // This file is only present on GSI builds.
-    let gsi_marker = PathBuf::from("/system/system_ext/etc/init/init.gsi.rc");
-
-    get_vsr_api_level() < 34 && gsi_marker.as_path().is_file()
+    get_vsr_api_level() < 34 && key_generations::is_gsi()
 }
 
 #[macro_export]
@@ -130,9 +130,9 @@ macro_rules! skip_device_id_attestation_tests {
 }
 
 #[macro_export]
-macro_rules! skip_tests_if_keymaster_impl_present {
-    () => {
-        if !key_generations::has_default_keymint() {
+macro_rules! require_keymint {
+    ($sl:ident) => {
+        if !$sl.is_keymint() {
             return;
         }
     };
@@ -141,19 +141,18 @@ macro_rules! skip_tests_if_keymaster_impl_present {
 /// Generate EC key and grant it to the list of users with given access vector.
 /// Returns the list of granted keys `nspace` values in the order of given grantee uids.
 pub fn generate_ec_key_and_grant_to_users(
-    keystore2: &binder::Strong<dyn IKeystoreService>,
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     alias: Option<String>,
     grantee_uids: Vec<i32>,
     access_vector: i32,
 ) -> Result<Vec<i64>, binder::Status> {
     let key_metadata =
-        key_generations::generate_ec_p256_signing_key(sec_level, Domain::APP, -1, alias, None)?;
+        key_generations::generate_ec_p256_signing_key(sl, Domain::APP, -1, alias, None)?;
 
     let mut granted_keys = Vec::new();
 
     for uid in grantee_uids {
-        let granted_key = keystore2.grant(&key_metadata.key, uid, access_vector)?;
+        let granted_key = sl.keystore2.grant(&key_metadata.key, uid, access_vector)?;
         assert_eq!(granted_key.domain, Domain::GRANT);
         granted_keys.push(granted_key.nspace);
     }
@@ -171,14 +170,12 @@ pub fn create_signing_operation(
     nspace: i64,
     alias: Option<String>,
 ) -> binder::Result<CreateOperationResponse> {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let key_metadata =
-        key_generations::generate_ec_p256_signing_key(&sec_level, domain, nspace, alias, None)
-            .unwrap();
+        key_generations::generate_ec_p256_signing_key(&sl, domain, nspace, alias, None).unwrap();
 
-    sec_level.createOperation(
+    sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(op_purpose).digest(op_digest),
         forced_op.0,

@@ -77,21 +77,6 @@ interface IKeystoreMaintenance {
     void onUserLskfRemoved(in int userId);
 
     /**
-     * Allows LockSettingsService to inform keystore about password change of a user.
-     * Callers require 'ChangePassword' permission.
-     *
-     * ## Error conditions:
-     * `ResponseCode::PERMISSION_DENIED` - if the callers does not have the 'ChangePassword'
-     *                                     permission.
-     * `ResponseCode::SYSTEM_ERROR` - if failed to delete the super encrypted keys of the user.
-     * `ResponseCode::Locked' -  if the keystore is locked for the given user.
-     *
-     * @param userId - Android user id
-     * @param password - a secret derived from the synthetic password of the user
-     */
-    void onUserPasswordChanged(in int userId, in @nullable byte[] password);
-
-    /**
      * This function deletes all keys within a namespace. It mainly gets called when an app gets
      * removed and all resources of this app need to be cleaned up.
      *

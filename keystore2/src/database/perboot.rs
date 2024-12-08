@@ -19,9 +19,9 @@ use super::AuthTokenEntry;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
 };
-use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::RwLock;
 
 #[derive(PartialEq, PartialOrd, Ord, Eq, Hash)]
@@ -70,11 +70,9 @@ pub struct PerbootDB {
     auth_tokens: RwLock<HashSet<AuthTokenEntryWrap>>,
 }
 
-lazy_static! {
-    /// The global instance of the perboot DB. Located here rather than in globals
-    /// in order to restrict access to the database module.
-    pub static ref PERBOOT_DB: Arc<PerbootDB> = Arc::new(PerbootDB::new());
-}
+/// The global instance of the perboot DB. Located here rather than in globals
+/// in order to restrict access to the database module.
+pub static PERBOOT_DB: LazyLock<Arc<PerbootDB>> = LazyLock::new(|| Arc::new(PerbootDB::new()));
 
 impl PerbootDB {
     /// Construct a new perboot database. Currently just uses default values.

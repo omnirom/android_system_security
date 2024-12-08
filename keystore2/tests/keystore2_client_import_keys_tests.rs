@@ -12,49 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::getuid;
-
-use openssl::rand::rand_bytes;
-use openssl::x509::X509;
-
+use crate::keystore2_client_test_utils::{
+    encrypt_secure_key, encrypt_transport_key, get_vsr_api_level,
+    perform_sample_asym_sign_verify_op, perform_sample_hmac_sign_verify_op,
+    perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
+};
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     ErrorCode::ErrorCode, HardwareAuthenticatorType::HardwareAuthenticatorType,
-    KeyPurpose::KeyPurpose, PaddingMode::PaddingMode, SecurityLevel::SecurityLevel,
+    KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
 };
 use android_system_keystore2::aidl::android::system::keystore2::{
     AuthenticatorSpec::AuthenticatorSpec, Domain::Domain,
     IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
     KeyMetadata::KeyMetadata, ResponseCode::ResponseCode,
 };
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
 use keystore2_test_utils::ffi_test_utils::{
     create_wrapped_key, create_wrapped_key_additional_auth_data,
 };
-
-use crate::keystore2_client_test_utils::{
-    encrypt_secure_key, encrypt_transport_key, get_vsr_api_level,
-    perform_sample_asym_sign_verify_op, perform_sample_hmac_sign_verify_op,
-    perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
-};
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
+use nix::unistd::getuid;
+use openssl::rand::rand_bytes;
+use openssl::x509::X509;
 
 pub fn import_rsa_sign_key_and_perform_sample_operation(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     domain: Domain,
     nspace: i64,
     alias: Option<String>,
     import_params: authorizations::AuthSetBuilder,
 ) {
     let key_metadata =
-        key_generations::import_rsa_2048_key(sec_level, domain, nspace, alias, import_params)
-            .unwrap();
+        key_generations::import_rsa_2048_key(sl, domain, nspace, alias, import_params).unwrap();
 
     perform_sample_asym_sign_verify_op(
-        sec_level,
+        &sl.binder,
         &key_metadata,
         Some(PaddingMode::RSA_PSS),
         Some(Digest::SHA_2_256),
@@ -93,7 +85,7 @@ fn perform_sym_key_encrypt_decrypt_op(
 }
 
 fn build_secure_key_wrapper(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     secure_key: &[u8],
     transport_key: &[u8],
     nonce: &[u8],
@@ -103,10 +95,10 @@ fn build_secure_key_wrapper(
     // Encrypt secure key with transport key.
     let transport_key_alias = format!("ks_transport_key_aes_256_key_test_{}", getuid());
     let transport_key_metadata =
-        key_generations::import_transport_key(sec_level, Some(transport_key_alias), transport_key)
+        key_generations::import_transport_key(sl, Some(transport_key_alias), transport_key)
             .unwrap();
     let encrypted_secure_key = encrypt_secure_key(
-        sec_level,
+        &sl.binder,
         secure_key,
         aad,
         nonce.to_vec(),
@@ -135,8 +127,7 @@ fn build_secure_key_wrapper(
 /// imported key. Test should be able to create an operation successfully.
 #[test]
 fn keystore2_rsa_import_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_rsa_key_test_import_1_{}{}", getuid(), 2048);
 
@@ -153,7 +144,7 @@ fn keystore2_rsa_import_key_success() {
         .cert_not_after(253402300799000);
 
     import_rsa_sign_key_and_perform_sample_operation(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -167,8 +158,7 @@ fn keystore2_rsa_import_key_success() {
 /// able to create an operation successfully.
 #[test]
 fn keystore2_rsa_import_key_determine_key_size_and_pub_exponent() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_rsa_key_test_import_2_{}{}", getuid(), 2048);
 
@@ -184,7 +174,7 @@ fn keystore2_rsa_import_key_determine_key_size_and_pub_exponent() {
         .cert_not_after(253402300799000);
 
     import_rsa_sign_key_and_perform_sample_operation(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -196,8 +186,7 @@ fn keystore2_rsa_import_key_determine_key_size_and_pub_exponent() {
 /// a key with `IMPORT_PARAMETER_MISMATCH` error code.
 #[test]
 fn keystore2_rsa_import_key_fails_with_keysize_param_mismatch_error() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_rsa_key_test_import_3_{}{}", getuid(), 2048);
 
@@ -213,7 +202,7 @@ fn keystore2_rsa_import_key_fails_with_keysize_param_mismatch_error() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let result = key_generations::map_ks_error(sec_level.importKey(
+    let result = key_generations::map_ks_error(sl.binder.importKey(
         &KeyDescriptor { domain: Domain::APP, nspace: -1, alias: Some(alias), blob: None },
         None,
         &import_params,
@@ -229,8 +218,7 @@ fn keystore2_rsa_import_key_fails_with_keysize_param_mismatch_error() {
 /// Test should fail to import a key with `IMPORT_PARAMETER_MISMATCH` error code.
 #[test]
 fn keystore2_rsa_import_key_fails_with_public_exponent_param_mismatch_error() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_rsa_key_test_import_4_{}{}", getuid(), 2048);
 
@@ -246,7 +234,7 @@ fn keystore2_rsa_import_key_fails_with_public_exponent_param_mismatch_error() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let result = key_generations::map_ks_error(sec_level.importKey(
+    let result = key_generations::map_ks_error(sl.binder.importKey(
         &KeyDescriptor { domain: Domain::APP, nspace: -1, alias: Some(alias), blob: None },
         None,
         &import_params,
@@ -259,12 +247,11 @@ fn keystore2_rsa_import_key_fails_with_public_exponent_param_mismatch_error() {
 }
 
 /// Try to import a key with multiple purposes. Test should fail to import a key with
-/// `INCOMPATIBLE_PURPOSE` error code. If the backend is `keymaster` then `importKey` shall be
-/// successful.
+/// `INCOMPATIBLE_PURPOSE` error code. If the backend is `keymaster` or KeyMint-version-1 then
+/// `importKey` shall be successful.
 #[test]
 fn keystore2_rsa_import_key_with_multipurpose_fails_incompt_purpose_error() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_rsa_key_test_import_5_{}{}", getuid(), 2048);
 
@@ -280,7 +267,7 @@ fn keystore2_rsa_import_key_with_multipurpose_fails_incompt_purpose_error() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let result = key_generations::map_ks_error(sec_level.importKey(
+    let result = key_generations::map_ks_error(sl.binder.importKey(
         &KeyDescriptor { domain: Domain::APP, nspace: -1, alias: Some(alias), blob: None },
         None,
         &import_params,
@@ -288,9 +275,15 @@ fn keystore2_rsa_import_key_with_multipurpose_fails_incompt_purpose_error() {
         key_generations::RSA_2048_KEY,
     ));
 
-    if key_generations::has_default_keymint() {
-        assert!(result.is_err());
-        assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
+    if sl.is_keymint() {
+        if sl.get_keymint_version() >= 2 {
+            // The KeyMint v1 spec required that KeyPurpose::ATTEST_KEY not be combined
+            // with other key purposes.  However, this was not checked at the time
+            // so we can only be strict about checking this for implementations of KeyMint
+            // version 2 and above.
+            assert!(result.is_err());
+            assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
+        }
     } else {
         assert!(result.is_ok());
     }
@@ -301,8 +294,7 @@ fn keystore2_rsa_import_key_with_multipurpose_fails_incompt_purpose_error() {
 /// able to create an operation successfully.
 #[test]
 fn keystore2_import_ec_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_ec_key_test_import_1_{}{}", getuid(), 256);
 
@@ -323,24 +315,18 @@ fn keystore2_import_ec_key_success() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let key_metadata = key_generations::import_ec_p_256_key(
-        &sec_level,
-        Domain::APP,
-        -1,
-        Some(alias),
-        import_params,
-    )
-    .expect("Failed to import EC key.");
+    let key_metadata =
+        key_generations::import_ec_p_256_key(&sl, Domain::APP, -1, Some(alias), import_params)
+            .expect("Failed to import EC key.");
 
-    perform_sample_asym_sign_verify_op(&sec_level, &key_metadata, None, Some(Digest::SHA_2_256));
+    perform_sample_asym_sign_verify_op(&sl.binder, &key_metadata, None, Some(Digest::SHA_2_256));
 }
 
 /// Try to import EC key with wrong ec-curve as import-key-parameter. Test should fail to import a
 /// key with `IMPORT_PARAMETER_MISMATCH` error code.
 #[test]
 fn keystore2_ec_import_key_fails_with_mismatch_curve_error() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_ec_key_test_import_1_{}{}", getuid(), 256);
 
@@ -354,7 +340,7 @@ fn keystore2_ec_import_key_fails_with_mismatch_curve_error() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let result = key_generations::map_ks_error(sec_level.importKey(
+    let result = key_generations::map_ks_error(sl.binder.importKey(
         &KeyDescriptor { domain: Domain::APP, nspace: -1, alias: Some(alias), blob: None },
         None,
         &import_params,
@@ -369,47 +355,41 @@ fn keystore2_ec_import_key_fails_with_mismatch_curve_error() {
 /// Test should be able to create an operation successfully.
 #[test]
 fn keystore2_import_aes_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_aes_key_test_import_1_{}{}", getuid(), 256);
-    let key_metadata = key_generations::import_aes_key(&sec_level, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_aes_key(&sl, Domain::APP, -1, Some(alias))
         .expect("Failed to import AES key.");
 
-    perform_sym_key_encrypt_decrypt_op(&sec_level, &key_metadata);
+    perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
 }
 
 /// Import 3DES key and verify key parameters. Try to create an operation using the imported key.
 /// Test should be able to create an operation successfully.
 #[test]
 fn keystore2_import_3des_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = key_generations::map_ks_error(
-        keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT),
-    )
-    .unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_3des_key_test_import_1_{}{}", getuid(), 168);
 
-    let key_metadata = key_generations::import_3des_key(&sec_level, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_3des_key(&sl, Domain::APP, -1, Some(alias))
         .expect("Failed to import 3DES key.");
 
-    perform_sym_key_encrypt_decrypt_op(&sec_level, &key_metadata);
+    perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
 }
 
 /// Import HMAC key and verify key parameters. Try to create an operation using the imported key.
 /// Test should be able to create an operation successfully.
 #[test]
 fn keystore2_import_hmac_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_hmac_key_test_import_1_{}", getuid());
 
-    let key_metadata = key_generations::import_hmac_key(&sec_level, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_hmac_key(&sl, Domain::APP, -1, Some(alias))
         .expect("Failed to import HMAC key.");
 
-    perform_sample_hmac_sign_verify_op(&sec_level, &key_metadata.key);
+    perform_sample_hmac_sign_verify_op(&sl.binder, &key_metadata.key);
 }
 
 /// This test creates a wrapped key data and imports it. Validates the imported wrapped key.
@@ -419,8 +399,7 @@ fn keystore2_import_hmac_key_success() {
 /// Test should successfully import the wrapped key and perform crypto operations.
 #[test]
 fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let mut secure_key = [0; 32];
     rand_bytes(&mut secure_key).unwrap();
@@ -434,7 +413,7 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
     // Import wrapping key.
     let wrapping_key_alias = format!("ks_wrapping_key_test_import_2_{}_2048", getuid());
     let wrapping_key_metadata = key_generations::import_wrapping_key(
-        &sec_level,
+        &sl,
         key_generations::RSA_2048_KEY,
         Some(wrapping_key_alias),
     )
@@ -446,7 +425,7 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
 
     // Build ASN.1 DER-encoded wrapped key material as described in `SecureKeyWrapper` schema.
     let wrapped_key_data = build_secure_key_wrapper(
-        &sec_level,
+        &sl,
         &secure_key,
         &transport_key,
         &nonce,
@@ -458,14 +437,14 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
     // Unwrap the key. Import wrapped key.
     let secured_key_alias = format!("ks_wrapped_aes_key_{}", getuid());
     let secured_key_metadata = key_generations::import_wrapped_key(
-        &sec_level,
+        &sl,
         Some(secured_key_alias),
         &wrapping_key_metadata,
         Some(wrapped_key_data.to_vec()),
     )
     .unwrap();
 
-    perform_sym_key_encrypt_decrypt_op(&sec_level, &secured_key_metadata);
+    perform_sym_key_encrypt_decrypt_op(&sl.binder, &secured_key_metadata);
 }
 
 /// Create a wrapped key data with invalid Additional Authenticated Data (AAD) and
@@ -476,8 +455,7 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
 /// Test should fail to import the wrapped key with error code `VERIFICATION_FAILED`.
 #[test]
 fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let mut secure_key = [0; 32];
     rand_bytes(&mut secure_key).unwrap();
@@ -491,7 +469,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
     // Import wrapping key.
     let wrapping_key_alias = format!("ks_wrapping_key_test_import_2_{}_2048", getuid());
     let wrapping_key_metadata = key_generations::import_wrapping_key(
-        &sec_level,
+        &sl,
         key_generations::RSA_2048_KEY,
         Some(wrapping_key_alias),
     )
@@ -502,7 +480,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
 
     // Build ASN.1 DER-encoded wrapped key material as described in `SecureKeyWrapper` schema.
     let wrapped_key_data = build_secure_key_wrapper(
-        &sec_level,
+        &sl,
         &secure_key,
         &transport_key,
         &nonce,
@@ -514,7 +492,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
     // Unwrap the key. Import wrapped key.
     let secured_key_alias = format!("ks_wrapped_aes_key_{}", getuid());
     let result = key_generations::map_ks_error(key_generations::import_wrapped_key(
-        &sec_level,
+        &sl,
         Some(secured_key_alias),
         &wrapping_key_metadata,
         Some(wrapped_key_data.to_vec()),
@@ -528,8 +506,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
 /// perform crypto operations successfully.
 #[test]
 fn keystore2_import_wrapped_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_wrapped_key_test_import_1_{}_256", getuid());
     let wrapping_key_alias = format!("ks_wrapping_key_test_import_1_{}_2048", getuid());
@@ -548,7 +525,7 @@ fn keystore2_import_wrapped_key_success() {
         .cert_not_after(253402300799000);
 
     let key_metadata = key_generations::import_wrapping_key_and_wrapped_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -558,7 +535,7 @@ fn keystore2_import_wrapped_key_success() {
     .expect("Failed to import wrapped key.");
 
     // Try to perform operations using wrapped key.
-    perform_sym_key_encrypt_decrypt_op(&sec_level, &key_metadata);
+    perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
 }
 
 /// Import wrapping-key without specifying KeyPurpose::WRAP_KEY in import key parameters. Try to
@@ -567,8 +544,7 @@ fn keystore2_import_wrapped_key_success() {
 /// `WRAP_KEY` purpose.
 #[test]
 fn keystore2_import_wrapped_key_fails_with_wrong_purpose() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let wrapping_key_alias = format!("ks_wrapping_key_test_import_2_{}_2048", getuid());
     let alias = format!("ks_wrapped_key_test_import_2_{}_256", getuid());
@@ -588,7 +564,7 @@ fn keystore2_import_wrapped_key_fails_with_wrong_purpose() {
 
     let result =
         key_generations::map_ks_error(key_generations::import_wrapping_key_and_wrapped_key(
-            &sec_level,
+            &sl,
             Domain::APP,
             -1,
             Some(alias),
@@ -604,8 +580,7 @@ fn keystore2_import_wrapped_key_fails_with_wrong_purpose() {
 /// Test should fail to import wrapped key with `ResponseCode::KEY_NOT_FOUND`.
 #[test]
 fn keystore2_import_wrapped_key_fails_with_missing_wrapping_key() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let unwrap_params = authorizations::AuthSetBuilder::new()
         .digest(Digest::SHA_2_256)
@@ -621,7 +596,7 @@ fn keystore2_import_wrapped_key_fails_with_missing_wrapping_key() {
     // Wrapping key with this alias doesn't exist.
     let wrapping_key_alias = format!("ks_wrapping_key_not_exist_{}_2048", getuid());
 
-    let result = key_generations::map_ks_error(sec_level.importWrappedKey(
+    let result = key_generations::map_ks_error(sl.binder.importWrappedKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,

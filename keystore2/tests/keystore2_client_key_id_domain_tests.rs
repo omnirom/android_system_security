@@ -12,20 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::getuid;
-
+use crate::keystore2_client_test_utils::perform_sample_sign_operation;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Digest::Digest, EcCurve::EcCurve, KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
+    Digest::Digest, EcCurve::EcCurve, KeyPurpose::KeyPurpose,
 };
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
-use crate::keystore2_client_test_utils::perform_sample_sign_operation;
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
+use nix::unistd::getuid;
 
 /// Try to generate a key with `Domain::KEY_ID`, test should fail with an error code
 /// `SYSTEM_ERROR`. `Domain::KEY_ID` is not allowed to use for generating a key. Key id is returned
@@ -33,11 +28,10 @@ use crate::keystore2_client_test_utils::perform_sample_sign_operation;
 #[test]
 fn keystore2_generate_key_with_key_id_domain_expect_sys_error() {
     let alias = "ks_gen_key_id_test_key";
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let result = key_generations::map_ks_error(key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::KEY_ID,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias.to_string()),
@@ -53,12 +47,11 @@ fn keystore2_generate_key_with_key_id_domain_expect_sys_error() {
 /// successfully.
 #[test]
 fn keystore2_find_key_with_key_id_as_domain() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "ks_key_id_test_key";
 
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -68,7 +61,8 @@ fn keystore2_find_key_with_key_id_as_domain() {
     .expect("Failed to generate a EC key.");
 
     // Try to load the above generated key with KEY_ID as domain.
-    let key_entry_response = keystore2
+    let key_entry_response = sl
+        .keystore2
         .getKeyEntry(&KeyDescriptor {
             domain: Domain::KEY_ID,
             nspace: key_metadata.key.nspace,
@@ -85,7 +79,8 @@ fn keystore2_find_key_with_key_id_as_domain() {
 
     // Try to create an operation using above loaded key, operation should be created
     // successfully.
-    let op_response = sec_level
+    let op_response = sl
+        .binder
         .createOperation(
             &key_entry_response.metadata.key,
             &authorizations::AuthSetBuilder::new()
@@ -110,12 +105,11 @@ fn keystore2_find_key_with_key_id_as_domain() {
 /// create an operation using the rebound key.
 #[test]
 fn keystore2_key_id_alias_rebind_verify_by_alias() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_key_id_test_alias_rebind_1_{}", getuid());
 
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -127,7 +121,7 @@ fn keystore2_key_id_alias_rebind_verify_by_alias() {
     // Generate a key with same alias as above generated key, so that alias will be rebound
     // to this key.
     let new_key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -142,7 +136,7 @@ fn keystore2_key_id_alias_rebind_verify_by_alias() {
 
     // Try to create an operation using previously generated key_metadata.
     // It should fail as previously generated key material is no longer remains valid.
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
@@ -152,7 +146,8 @@ fn keystore2_key_id_alias_rebind_verify_by_alias() {
 
     // Try to create an operation using rebound key, operation should be created
     // successfully.
-    let op_response = sec_level
+    let op_response = sl
+        .binder
         .createOperation(
             &new_key_metadata.key,
             &authorizations::AuthSetBuilder::new()
@@ -177,12 +172,11 @@ fn keystore2_key_id_alias_rebind_verify_by_alias() {
 /// Test should successfully create an operation using the rebound key.
 #[test]
 fn keystore2_key_id_alias_rebind_verify_by_key_id() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_key_id_test_alias_rebind_2_{}", getuid());
 
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -192,7 +186,8 @@ fn keystore2_key_id_alias_rebind_verify_by_key_id() {
     .expect("Failed to generate a EC key.");
 
     // Load the above generated key with KEY_ID as domain.
-    let key_entry_response = keystore2
+    let key_entry_response = sl
+        .keystore2
         .getKeyEntry(&KeyDescriptor {
             domain: Domain::KEY_ID,
             nspace: key_metadata.key.nspace,
@@ -210,7 +205,7 @@ fn keystore2_key_id_alias_rebind_verify_by_key_id() {
     // Generate another key with same alias as above generated key, so that alias will be rebound
     // to this key.
     let new_key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -227,7 +222,7 @@ fn keystore2_key_id_alias_rebind_verify_by_key_id() {
 
     // Try to create an operation using previously loaded key_entry_response.
     // It should fail as previously generated key material is no longer valid.
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_entry_response.metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
@@ -237,7 +232,8 @@ fn keystore2_key_id_alias_rebind_verify_by_key_id() {
 
     // Try to create an operation using rebound key, operation should be created
     // successfully.
-    let op_response = sec_level
+    let op_response = sl
+        .binder
         .createOperation(
             &new_key_metadata.key,
             &authorizations::AuthSetBuilder::new()

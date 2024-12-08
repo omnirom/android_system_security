@@ -134,6 +134,7 @@ impl DB {
     }
 
     fn get(&mut self, caller_uid: u32, alias: &str) -> Result<Option<Vec<u8>>> {
+        ensure_keystore_get_is_enabled()?;
         self.with_transaction(TransactionBehavior::Deferred, |tx| {
             tx.query_row(
                 "SELECT profile FROM profiles WHERE owner = ? AND alias = ?;",
@@ -239,6 +240,17 @@ fn ensure_keystore_put_is_enabled() -> Result<()> {
     }
 }
 
+fn ensure_keystore_get_is_enabled() -> Result<()> {
+    if keystore2_flags::disable_legacy_keystore_get() {
+        Err(Error::deprecated()).context(concat!(
+            "Retrieving from Keystore's legacy database is ",
+            "no longer supported, store in an app-specific database instead"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 struct LegacyKeystoreDeleteListener {
     legacy_keystore: Arc<LegacyKeystore>,
 }
@@ -313,6 +325,7 @@ impl LegacyKeystore {
     }
 
     fn get(&self, alias: &str, uid: i32) -> Result<Vec<u8>> {
+        ensure_keystore_get_is_enabled()?;
         let mut db = self.open_db().context("In get.")?;
         let uid = Self::get_effective_uid(uid).context("In get.")?;
 

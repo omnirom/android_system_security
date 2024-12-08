@@ -1,4 +1,4 @@
-// Copyright (C) 2022 The Android Open Source Project
+// Copyright 2020, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,4 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cutils/sockets.h>
+use crate::key_parameter::*;
+
+// Test basic functionality of KeyParameter.
+#[test]
+fn test_key_parameter() {
+    let key_parameter =
+        KeyParameter::new(KeyParameterValue::Algorithm(Algorithm::RSA), SecurityLevel::STRONGBOX);
+
+    assert_eq!(key_parameter.get_tag(), Tag::ALGORITHM);
+
+    assert_eq!(*key_parameter.key_parameter_value(), KeyParameterValue::Algorithm(Algorithm::RSA));
+
+    assert_eq!(*key_parameter.security_level(), SecurityLevel::STRONGBOX);
+}

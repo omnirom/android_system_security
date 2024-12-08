@@ -43,6 +43,8 @@ DEFINE_bool(self_test, true,
             "If true, this tool performs a self-test, validating the payload for correctness. "
             "This checks that the device on the factory line is producing valid output "
             "before attempting to upload the output to the device info service.");
+DEFINE_bool(allow_degenerate, true,
+            "If true, self_test validation will allow degenerate DICE chains in the CSR.");
 DEFINE_string(serialno_prop, "ro.serialno",
               "The property of getting serial number. Defaults to 'ro.serialno'.");
 
@@ -83,7 +85,7 @@ void getCsrForIRpc(const char* descriptor, const char* name, IRemotelyProvisione
     if (std::string(name) == "avf" && !isRemoteProvisioningSupported(irpc)) {
         return;
     }
-    auto [request, errMsg] = getCsr(name, irpc, FLAGS_self_test);
+    auto [request, errMsg] = getCsr(name, irpc, FLAGS_self_test, FLAGS_allow_degenerate);
     auto fullName = getFullServiceName(descriptor, name);
     if (!request) {
         std::cerr << "Unable to build CSR for '" << fullName << ": " << errMsg << std::endl;

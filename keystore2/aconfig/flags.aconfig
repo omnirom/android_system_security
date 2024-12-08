@@ -18,17 +18,25 @@ flag {
 }
 
 flag {
-  name: "import_previously_emulated_keys"
+  name: "disable_legacy_keystore_get"
   namespace: "hardware_backed_security"
-  description: "Include support for importing keys that were previously software-emulated into KeyMint"
-  bug: "283077822"
+  description: "This flag disables legacy keystore get and makes it so that get returns an error"
+  bug: "307460850"
   is_fixed_read_only: true
 }
 
 flag {
-  name: "database_loop_timeout"
+  name: "enable_dump"
   namespace: "hardware_backed_security"
-  description: "Abandon Keystore database retry loop after an interval"
-  bug: "319563050"
+  description: "Include support for dump() on the IKeystoreMaintenance service"
+  bug: "344987718"
+  is_fixed_read_only: true
+}
+
+flag {
+  name: "import_previously_emulated_keys"
+  namespace: "hardware_backed_security"
+  description: "Include support for importing keys that were previously software-emulated into KeyMint"
+  bug: "283077822"
   is_fixed_read_only: true
 }

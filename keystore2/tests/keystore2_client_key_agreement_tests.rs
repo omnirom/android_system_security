@@ -12,27 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
+    KeyMetadata::KeyMetadata,
+};
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
 use nix::unistd::getuid;
-
 use openssl::ec::{EcGroup, EcKey};
 use openssl::error::ErrorStack;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, PKeyRef, Private, Public};
 use openssl::pkey_ctx::PkeyCtx;
 use openssl::x509::X509;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
-    SecurityLevel::SecurityLevel,
-};
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-    KeyMetadata::KeyMetadata,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
 
 /// This macro is used to verify that the key agreement works for the given curve.
 macro_rules! test_ec_key_agree {
@@ -89,13 +83,12 @@ fn ec_curve_to_openrssl_curve_name(ec_curve: &EcCurve) -> Nid {
 /// Generate two EC keys with given curve from KeyMint and OpeanSSL. Perform local ECDH between
 /// them and verify that the derived secrets are the same.
 fn perform_ec_key_agreement(ec_curve: EcCurve) {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let openssl_ec_curve = ec_curve_to_openrssl_curve_name(&ec_curve);
 
     let alias = format!("ks_ec_test_key_agree_{}", getuid());
     let keymint_key = key_generations::generate_ec_agree_key(
-        &sec_level,
+        &sl,
         ec_curve,
         Digest::SHA_2_256,
         Domain::APP,
@@ -111,7 +104,7 @@ fn perform_ec_key_agreement(ec_curve: EcCurve) {
     let local_key = PKey::from_ec_key(ec_key).unwrap();
     let local_pub_key = local_key.public_key_to_der().unwrap();
 
-    check_agreement(&sec_level, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
+    check_agreement(&sl.binder, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
 }
 
 test_ec_key_agree!(test_ec_p224_key_agreement, EcCurve::P_224);
@@ -119,16 +112,15 @@ test_ec_key_agree!(test_ec_p256_key_agreement, EcCurve::P_256);
 test_ec_key_agree!(test_ec_p384_key_agreement, EcCurve::P_384);
 test_ec_key_agree!(test_ec_p521_key_agreement, EcCurve::P_521);
 
-/// Generate two EC keys with curve `CURVE_25519` from KeyMint and OpeanSSL.
+/// Generate two EC keys with curve `CURVE_25519` from KeyMint and OpenSSL.
 /// Perform local ECDH between them and verify that the derived secrets are the same.
 #[test]
 fn keystore2_ec_25519_agree_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_ec_25519_test_key_agree_{}", getuid());
     let keymint_key = key_generations::generate_ec_agree_key(
-        &sec_level,
+        &sl,
         EcCurve::CURVE_25519,
         Digest::NONE,
         Domain::APP,
@@ -142,19 +134,18 @@ fn keystore2_ec_25519_agree_key_success() {
     let local_key = PKey::generate_x25519().unwrap();
     let local_pub_key = local_key.public_key_to_der().unwrap();
 
-    check_agreement(&sec_level, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
+    check_agreement(&sl.binder, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
 }
 
 /// Generate two EC keys with different curves and try to perform local ECDH. Since keys are using
 /// different curves operation should fail with `ErrorCode:INVALID_ARGUMENT`.
 #[test]
 fn keystore2_ec_agree_key_with_different_curves_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_test_key_agree_fail{}", getuid());
     let keymint_key = key_generations::generate_ec_agree_key(
-        &sec_level,
+        &sl,
         EcCurve::P_256,
         Digest::SHA_2_256,
         Domain::APP,
@@ -169,7 +160,7 @@ fn keystore2_ec_agree_key_with_different_curves_fail() {
     // If the keys are using different curves KeyMint should fail with
     // ErrorCode:INVALID_ARGUMENT.
     let authorizations = authorizations::AuthSetBuilder::new().purpose(KeyPurpose::AGREE_KEY);
-    let key_agree_op = sec_level.createOperation(&keymint_key.key, &authorizations, false).unwrap();
+    let key_agree_op = sl.binder.createOperation(&keymint_key.key, &authorizations, false).unwrap();
     assert!(key_agree_op.iOperation.is_some());
 
     let op = key_agree_op.iOperation.unwrap();

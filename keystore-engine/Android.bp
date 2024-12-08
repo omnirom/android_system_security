@@ -27,7 +27,8 @@ cc_library {
     name: "libkeystore-engine",
 
     defaults: [
-        "keystore2_use_latest_aidl_ndk_shared",
+        "keymint_use_latest_hal_aidl_ndk_static",
+        "keystore2_use_latest_aidl_ndk_static",
     ],
     srcs: [
         "android_engine.cpp",
@@ -41,7 +42,6 @@ cc_library {
     ],
 
     shared_libs: [
-        "android.system.keystore2-V4-ndk",
         "libbinder_ndk",
         "libcrypto",
         "libcutils",

@@ -50,8 +50,6 @@ use std::{
 enum AuthRequestState {
     /// An outstanding per operation authorization request.
     OpAuth,
-    /// An outstanding request for per operation authorization and secure timestamp.
-    TimeStampedOpAuth(Mutex<Receiver<Result<TimeStampToken, Error>>>),
     /// An outstanding request for a timestamp token.
     TimeStamp(Mutex<Receiver<Result<TimeStampToken, Error>>>),
 }
@@ -59,21 +57,13 @@ enum AuthRequestState {
 #[derive(Debug)]
 struct AuthRequest {
     state: AuthRequestState,
-    /// This need to be set to Some to fulfill a AuthRequestState::OpAuth or
-    /// AuthRequestState::TimeStampedOpAuth.
+    /// This need to be set to Some to fulfill an AuthRequestState::OpAuth.
     hat: Mutex<Option<HardwareAuthToken>>,
 }
 
 impl AuthRequest {
     fn op_auth() -> Arc<Self> {
         Arc::new(Self { state: AuthRequestState::OpAuth, hat: Mutex::new(None) })
-    }
-
-    fn timestamped_op_auth(receiver: Receiver<Result<TimeStampToken, Error>>) -> Arc<Self> {
-        Arc::new(Self {
-            state: AuthRequestState::TimeStampedOpAuth(Mutex::new(receiver)),
-            hat: Mutex::new(None),
-        })
     }
 
     fn timestamp(
@@ -100,7 +90,7 @@ impl AuthRequest {
             .context(ks_err!("No operation auth token received."))?;
 
         let tst = match &self.state {
-            AuthRequestState::TimeStampedOpAuth(recv) | AuthRequestState::TimeStamp(recv) => {
+            AuthRequestState::TimeStamp(recv) => {
                 let result = recv
                     .lock()
                     .unwrap()
@@ -132,9 +122,6 @@ enum DeferredAuthState {
     /// loaded from the database, but it has to be accompanied by a time stamp token to inform
     /// the target KM with a different clock about the time on the authenticators.
     TimeStampRequired(HardwareAuthToken),
-    /// Indicates that both an operation bound auth token and a verification token are
-    /// before the operation can commence.
-    TimeStampedOpAuthRequired,
     /// In this state the auth info is waiting for the deferred authorizations to come in.
     /// We block on timestamp tokens, because we can always make progress on these requests.
     /// The per-op auth tokens might never come, which means we fail if the client calls
@@ -254,16 +241,6 @@ impl AuthInfo {
                 self.state = DeferredAuthState::Waiting(auth_request);
                 Some(OperationChallenge { challenge })
             }
-            DeferredAuthState::TimeStampedOpAuthRequired => {
-                let (sender, receiver) = channel::<Result<TimeStampToken, Error>>();
-                let auth_request = AuthRequest::timestamped_op_auth(receiver);
-                let token_receiver = TokenReceiver(Arc::downgrade(&auth_request));
-                ENFORCEMENTS.register_op_auth_receiver(challenge, token_receiver);
-
-                ASYNC_TASK.queue_hi(move |_| timestamp_token_request(challenge, sender));
-                self.state = DeferredAuthState::Waiting(auth_request);
-                Some(OperationChallenge { challenge })
-            }
             DeferredAuthState::TimeStampRequired(hat) => {
                 let hat = (*hat).clone();
                 let (sender, receiver) = channel::<Result<TimeStampToken, Error>>();
@@ -349,9 +326,7 @@ impl AuthInfo {
         match &self.state {
             DeferredAuthState::NoAuthRequired => Ok((None, None)),
             DeferredAuthState::Token(hat, tst) => Ok((Some((*hat).clone()), (*tst).clone())),
-            DeferredAuthState::OpAuthRequired
-            | DeferredAuthState::TimeStampedOpAuthRequired
-            | DeferredAuthState::TimeStampRequired(_) => {
+            DeferredAuthState::OpAuthRequired | DeferredAuthState::TimeStampRequired(_) => {
                 Err(Error::Km(ErrorCode::KEY_USER_NOT_AUTHENTICATED)).context(ks_err!(
                     "No operation auth token requested??? \
                     This should not happen."
@@ -599,123 +574,36 @@ impl Enforcements {
             }
         }
 
-        if android_security_flags::fix_unlocked_device_required_keys_v2() {
-            let (hat, state) = if user_secure_ids.is_empty() {
-                (None, DeferredAuthState::NoAuthRequired)
-            } else if let Some(key_time_out) = key_time_out {
-                let hat = Self::find_auth_token(|hat: &AuthTokenEntry| match user_auth_type {
-                    Some(auth_type) => hat.satisfies(&user_secure_ids, auth_type),
-                    None => false, // not reachable due to earlier check
-                })
-                .ok_or(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
-                .context(ks_err!("No suitable auth token found."))?;
-                let now = BootTime::now();
-                let token_age = now
-                    .checked_sub(&hat.time_received())
-                    .ok_or_else(Error::sys)
-                    .context(ks_err!(
-                        "Overflow while computing Auth token validity. \
-                    Validity cannot be established."
-                    ))?;
+        let (hat, state) = if user_secure_ids.is_empty() {
+            (None, DeferredAuthState::NoAuthRequired)
+        } else if let Some(key_time_out) = key_time_out {
+            let hat = Self::find_auth_token(|hat: &AuthTokenEntry| match user_auth_type {
+                Some(auth_type) => hat.satisfies(&user_secure_ids, auth_type),
+                None => false, // not reachable due to earlier check
+            })
+            .ok_or(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
+            .context(ks_err!("No suitable auth token found."))?;
+            let now = BootTime::now();
+            let token_age =
+                now.checked_sub(&hat.time_received()).ok_or_else(Error::sys).context(ks_err!(
+                    "Overflow while computing Auth token validity. \
+                Validity cannot be established."
+                ))?;
 
-                if token_age.seconds() > key_time_out {
-                    return Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
-                        .context(ks_err!("matching auth token is expired."));
-                }
-                let state = if requires_timestamp {
-                    DeferredAuthState::TimeStampRequired(hat.auth_token().clone())
-                } else {
-                    DeferredAuthState::NoAuthRequired
-                };
-                (Some(hat.take_auth_token()), state)
+            if token_age.seconds() > key_time_out {
+                return Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
+                    .context(ks_err!("matching auth token is expired."));
+            }
+            let state = if requires_timestamp {
+                DeferredAuthState::TimeStampRequired(hat.auth_token().clone())
             } else {
-                (None, DeferredAuthState::OpAuthRequired)
+                DeferredAuthState::NoAuthRequired
             };
-            return Ok((hat, AuthInfo { state, key_usage_limited, confirmation_token_receiver }));
-        }
-
-        if !unlocked_device_required && no_auth_required {
-            return Ok((
-                None,
-                AuthInfo {
-                    state: DeferredAuthState::NoAuthRequired,
-                    key_usage_limited,
-                    confirmation_token_receiver,
-                },
-            ));
-        }
-
-        let has_sids = !user_secure_ids.is_empty();
-
-        let timeout_bound = key_time_out.is_some() && has_sids;
-
-        let per_op_bound = key_time_out.is_none() && has_sids;
-
-        let need_auth_token = timeout_bound || unlocked_device_required;
-
-        let hat = if need_auth_token {
-            let hat = Self::find_auth_token(|hat: &AuthTokenEntry| {
-                if let (Some(auth_type), true) = (user_auth_type, timeout_bound) {
-                    hat.satisfies(&user_secure_ids, auth_type)
-                } else {
-                    unlocked_device_required
-                }
-            });
-            Some(
-                hat.ok_or(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
-                    .context(ks_err!("No suitable auth token found."))?,
-            )
+            (Some(hat.take_auth_token()), state)
         } else {
-            None
+            (None, DeferredAuthState::OpAuthRequired)
         };
-
-        // Now check the validity of the auth token if the key is timeout bound.
-        let hat = match (hat, key_time_out) {
-            (Some(hat), Some(key_time_out)) => {
-                let now = BootTime::now();
-                let token_age = now
-                    .checked_sub(&hat.time_received())
-                    .ok_or_else(Error::sys)
-                    .context(ks_err!(
-                        "Overflow while computing Auth token validity. \
-                    Validity cannot be established."
-                    ))?;
-
-                if token_age.seconds() > key_time_out {
-                    return Err(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
-                        .context(ks_err!("matching auth token is expired."));
-                }
-                Some(hat)
-            }
-            (Some(hat), None) => Some(hat),
-            // If timeout_bound is true, above code must have retrieved a HAT or returned with
-            // KEY_USER_NOT_AUTHENTICATED. This arm should not be reachable.
-            (None, Some(_)) => panic!("Logical error."),
-            _ => None,
-        };
-
-        Ok(match (hat, requires_timestamp, per_op_bound) {
-            // Per-op-bound and Some(hat) can only happen if we are both per-op bound and unlocked
-            // device required. In addition, this KM instance needs a timestamp token.
-            // So the HAT cannot be presented on create. So on update/finish we present both
-            // an per-op-bound auth token and a timestamp token.
-            (Some(_), true, true) => (None, DeferredAuthState::TimeStampedOpAuthRequired),
-            (Some(hat), true, false) => (
-                Some(hat.auth_token().clone()),
-                DeferredAuthState::TimeStampRequired(hat.take_auth_token()),
-            ),
-            (Some(hat), false, true) => {
-                (Some(hat.take_auth_token()), DeferredAuthState::OpAuthRequired)
-            }
-            (Some(hat), false, false) => {
-                (Some(hat.take_auth_token()), DeferredAuthState::NoAuthRequired)
-            }
-            (None, _, true) => (None, DeferredAuthState::OpAuthRequired),
-            (None, _, false) => (None, DeferredAuthState::NoAuthRequired),
-        })
-        .map(|(hat, state)| {
-            (hat, AuthInfo { state, key_usage_limited, confirmation_token_receiver })
-        })
+        Ok((hat, AuthInfo { state, key_usage_limited, confirmation_token_receiver }))
     }
 
     fn find_auth_token<F>(p: F) -> Option<AuthTokenEntry>

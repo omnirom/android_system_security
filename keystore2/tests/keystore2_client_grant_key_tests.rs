@@ -12,37 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::{getuid, Gid, Uid};
-use rustutils::users::AID_USER_OFFSET;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Digest::Digest, KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
-};
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
-    IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
-    ResponseCode::ResponseCode,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error, run_as,
-};
-
 use crate::keystore2_client_test_utils::{
     generate_ec_key_and_grant_to_users, perform_sample_sign_operation,
 };
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Digest::Digest, KeyPurpose::KeyPurpose,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
+    ResponseCode::ResponseCode,
+};
+use keystore2_test_utils::{
+    authorizations, get_keystore_service, key_generations, key_generations::Error, run_as, SecLevel,
+};
+use nix::unistd::{getuid, Gid, Uid};
+use rustutils::users::AID_USER_OFFSET;
 
 /// Generate an EC signing key and grant it to the user with given access vector.
 fn generate_ec_key_and_grant_to_user(
     grantee_uid: i32,
     access_vector: i32,
 ) -> binder::Result<KeyDescriptor> {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("{}{}", "ks_grant_test_key_1", getuid());
 
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::SELINUX,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias),
@@ -50,15 +45,14 @@ fn generate_ec_key_and_grant_to_user(
     )
     .unwrap();
 
-    keystore2.grant(&key_metadata.key, grantee_uid, access_vector)
+    sl.keystore2.grant(&key_metadata.key, grantee_uid, access_vector)
 }
 
 fn load_grant_key_and_perform_sign_operation(
-    keystore2: &binder::Strong<dyn IKeystoreService>,
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     grant_key_nspace: i64,
 ) -> Result<(), binder::Status> {
-    let key_entry_response = keystore2.getKeyEntry(&KeyDescriptor {
+    let key_entry_response = sl.keystore2.getKeyEntry(&KeyDescriptor {
         domain: Domain::GRANT,
         nspace: grant_key_nspace,
         alias: None,
@@ -66,7 +60,7 @@ fn load_grant_key_and_perform_sign_operation(
     })?;
 
     // Perform sample crypto operation using granted key.
-    let op_response = sec_level.createOperation(
+    let op_response = sl.binder.createOperation(
         &key_entry_response.metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
@@ -195,12 +189,11 @@ fn keystore2_grant_get_info_use_key_perm() {
             Uid::from_raw(GRANTEE_UID),
             Gid::from_raw(GRANTEE_GID),
             move || {
-                let keystore2 = get_keystore_service();
-                let sec_level =
-                    keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+                let sl = SecLevel::tee();
 
                 // Load the granted key.
-                let key_entry_response = keystore2
+                let key_entry_response = sl
+                    .keystore2
                     .getKeyEntry(&KeyDescriptor {
                         domain: Domain::GRANT,
                         nspace: grant_key_nspace,
@@ -210,7 +203,8 @@ fn keystore2_grant_get_info_use_key_perm() {
                     .unwrap();
 
                 // Perform sample crypto operation using granted key.
-                let op_response = sec_level
+                let op_response = sl
+                    .binder
                     .createOperation(
                         &key_entry_response.metadata.key,
                         &authorizations::AuthSetBuilder::new()
@@ -228,12 +222,13 @@ fn keystore2_grant_get_info_use_key_perm() {
                 );
 
                 // Try to delete the key, it is expected to be fail with permission denied error.
-                let result = key_generations::map_ks_error(keystore2.deleteKey(&KeyDescriptor {
-                    domain: Domain::GRANT,
-                    nspace: grant_key_nspace,
-                    alias: None,
-                    blob: None,
-                }));
+                let result =
+                    key_generations::map_ks_error(sl.keystore2.deleteKey(&KeyDescriptor {
+                        domain: Domain::GRANT,
+                        nspace: grant_key_nspace,
+                        alias: None,
+                        blob: None,
+                    }));
                 assert!(result.is_err());
                 assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
             },
@@ -258,12 +253,10 @@ fn keystore2_grant_delete_key_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     let grant_key_nspace = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let access_vector = KeyPermission::DELETE.0;
             let mut grant_keys = generate_ec_key_and_grant_to_users(
-                &keystore2,
-                &sec_level,
+                &sl,
                 Some(ALIAS.to_string()),
                 vec![GRANTEE_UID.try_into().unwrap()],
                 access_vector,
@@ -335,13 +328,11 @@ fn keystore2_grant_key_fails_with_permission_denied() {
     // SAFETY: The test is run in a separate process with no other threads.
     let grant_key_nspace = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let access_vector = KeyPermission::GET_INFO.0;
             let alias = format!("ks_grant_perm_denied_key_{}", getuid());
             let mut grant_keys = generate_ec_key_and_grant_to_users(
-                &keystore2,
-                &sec_level,
+                &sl,
                 Some(alias),
                 vec![GRANTEE_UID.try_into().unwrap()],
                 access_vector,
@@ -411,8 +402,7 @@ fn keystore2_grant_key_fails_with_permission_denied() {
 /// `GRANT` access. Test should fail to grant a key with `PERMISSION_DENIED` error response code.
 #[test]
 fn keystore2_grant_key_fails_with_grant_perm_expect_perm_denied() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let access_vector = KeyPermission::GRANT.0;
     let alias = format!("ks_grant_access_vec_key_{}", getuid());
     let user_id = 98;
@@ -420,8 +410,7 @@ fn keystore2_grant_key_fails_with_grant_perm_expect_perm_denied() {
     let grantee_uid = user_id * AID_USER_OFFSET + application_id;
 
     let result = key_generations::map_ks_error(generate_ec_key_and_grant_to_users(
-        &keystore2,
-        &sec_level,
+        &sl,
         Some(alias),
         vec![grantee_uid.try_into().unwrap()],
         access_vector,
@@ -470,13 +459,11 @@ fn keystore2_ungrant_key_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     let grant_key_nspace = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let alias = format!("ks_ungrant_test_key_1{}", getuid());
             let access_vector = KeyPermission::GET_INFO.0;
             let mut grant_keys = generate_ec_key_and_grant_to_users(
-                &keystore2,
-                &sec_level,
+                &sl,
                 Some(alias.to_string()),
                 vec![GRANTEE_UID.try_into().unwrap()],
                 access_vector,
@@ -485,8 +472,8 @@ fn keystore2_ungrant_key_success() {
 
             let grant_key_nspace = grant_keys.remove(0);
 
-            //Ungrant above granted key.
-            keystore2
+            // Ungrant above granted key.
+            sl.keystore2
                 .ungrant(
                     &KeyDescriptor {
                         domain: Domain::APP,
@@ -542,12 +529,11 @@ fn keystore2_ungrant_fails_with_non_existing_key_expect_key_not_found_error() {
     // SAFETY: The test is run in a separate process with no other threads.
     let grant_key_nspace = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let alias = format!("{}{}", "ks_grant_delete_ungrant_test_key_1", getuid());
 
             let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::SELINUX,
                 key_generations::SELINUX_SHELL_NAMESPACE,
                 Some(alias.to_string()),
@@ -556,17 +542,18 @@ fn keystore2_ungrant_fails_with_non_existing_key_expect_key_not_found_error() {
             .unwrap();
 
             let access_vector = KeyPermission::GET_INFO.0;
-            let grant_key = keystore2
+            let grant_key = sl
+                .keystore2
                 .grant(&key_metadata.key, GRANTEE_UID.try_into().unwrap(), access_vector)
                 .unwrap();
             assert_eq!(grant_key.domain, Domain::GRANT);
 
             // Delete above granted key.
-            keystore2.deleteKey(&key_metadata.key).unwrap();
+            sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 
             // Try to ungrant above granted key.
             let result = key_generations::map_ks_error(
-                keystore2.ungrant(&key_metadata.key, GRANTEE_UID.try_into().unwrap()),
+                sl.keystore2.ungrant(&key_metadata.key, GRANTEE_UID.try_into().unwrap()),
             );
             assert!(result.is_err());
             assert_eq!(Error::Rc(ResponseCode::KEY_NOT_FOUND), result.unwrap_err());
@@ -574,7 +561,7 @@ fn keystore2_ungrant_fails_with_non_existing_key_expect_key_not_found_error() {
             // Generate a new key with the same alias and try to access the earlier granted key
             // in grantee context.
             let result = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::SELINUX,
                 key_generations::SELINUX_SHELL_NAMESPACE,
                 Some(alias),
@@ -631,14 +618,12 @@ fn keystore2_grant_key_to_multi_users_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     let mut grant_keys = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let alias = format!("ks_grant_test_key_2{}", getuid());
             let access_vector = KeyPermission::GET_INFO.0 | KeyPermission::USE.0;
 
             generate_ec_key_and_grant_to_users(
-                &keystore2,
-                &sec_level,
+                &sl,
                 Some(alias),
                 vec![GRANTEE_1_UID.try_into().unwrap(), GRANTEE_2_UID.try_into().unwrap()],
                 access_vector,
@@ -658,15 +643,12 @@ fn keystore2_grant_key_to_multi_users_success() {
                 Uid::from_raw(*grantee_uid),
                 Gid::from_raw(*grantee_gid),
                 move || {
-                    let keystore2 = get_keystore_service();
-                    let sec_level =
-                        keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+                    let sl = SecLevel::tee();
 
                     assert_eq!(
                         Ok(()),
                         key_generations::map_ks_error(load_grant_key_and_perform_sign_operation(
-                            &keystore2,
-                            &sec_level,
+                            &sl,
                             grant_key_nspace
                         ))
                     );
@@ -697,15 +679,13 @@ fn keystore2_grant_key_to_multi_users_delete_fails_with_key_not_found_error() {
     // SAFETY: The test is run in a separate process with no other threads.
     let mut grant_keys = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let alias = format!("ks_grant_test_key_2{}", getuid());
             let access_vector =
                 KeyPermission::GET_INFO.0 | KeyPermission::USE.0 | KeyPermission::DELETE.0;
 
             generate_ec_key_and_grant_to_users(
-                &keystore2,
-                &sec_level,
+                &sl,
                 Some(alias),
                 vec![GRANTEE_1_UID.try_into().unwrap(), GRANTEE_2_UID.try_into().unwrap()],
                 access_vector,
@@ -723,21 +703,18 @@ fn keystore2_grant_key_to_multi_users_delete_fails_with_key_not_found_error() {
             Uid::from_raw(GRANTEE_1_UID),
             Gid::from_raw(GRANTEE_1_GID),
             move || {
-                let keystore2 = get_keystore_service();
-                let sec_level =
-                    keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+                let sl = SecLevel::tee();
 
                 assert_eq!(
                     Ok(()),
                     key_generations::map_ks_error(load_grant_key_and_perform_sign_operation(
-                        &keystore2,
-                        &sec_level,
+                        &sl,
                         grant_key1_nspace
                     ))
                 );
 
                 // Delete the granted key.
-                keystore2
+                sl.keystore2
                     .deleteKey(&KeyDescriptor {
                         domain: Domain::GRANT,
                         nspace: grant_key1_nspace,

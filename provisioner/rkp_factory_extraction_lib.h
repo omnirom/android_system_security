@@ -47,7 +47,7 @@ std::vector<uint8_t> generateChallenge();
 CborResult<cppbor::Array>
 getCsr(std::string_view componentName,
        aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent* irpc,
-       bool selfTest);
+       bool selfTest, bool allowDegenerate);
 
 // Generates a test certificate chain and validates it, exiting the process on error.
 void selfTestGetCsr(

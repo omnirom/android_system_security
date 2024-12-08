@@ -150,7 +150,7 @@ impl AuthorizationManager {
         &self,
         user_id: i32,
         unlocking_sids: &[i64],
-        mut weak_unlock_enabled: bool,
+        weak_unlock_enabled: bool,
     ) -> Result<()> {
         log::info!(
             "on_device_locked(user_id={}, unlocking_sids={:?}, weak_unlock_enabled={})",
@@ -158,9 +158,6 @@ impl AuthorizationManager {
             unlocking_sids,
             weak_unlock_enabled
         );
-        if !android_security_flags::fix_unlocked_device_required_keys_v2() {
-            weak_unlock_enabled = false;
-        }
         check_keystore_permission(KeystorePerm::Lock)
             .context(ks_err!("caller missing Lock permission"))?;
         ENFORCEMENTS.set_device_locked(user_id, true);
@@ -178,9 +175,6 @@ impl AuthorizationManager {
 
     fn on_weak_unlock_methods_expired(&self, user_id: i32) -> Result<()> {
         log::info!("on_weak_unlock_methods_expired(user_id={})", user_id);
-        if !android_security_flags::fix_unlocked_device_required_keys_v2() {
-            return Ok(());
-        }
         check_keystore_permission(KeystorePerm::Lock)
             .context(ks_err!("caller missing Lock permission"))?;
         SUPER_KEY.write().unwrap().wipe_plaintext_unlocked_device_required_keys(user_id as u32);
@@ -189,9 +183,6 @@ impl AuthorizationManager {
 
     fn on_non_lskf_unlock_methods_expired(&self, user_id: i32) -> Result<()> {
         log::info!("on_non_lskf_unlock_methods_expired(user_id={})", user_id);
-        if !android_security_flags::fix_unlocked_device_required_keys_v2() {
-            return Ok(());
-        }
         check_keystore_permission(KeystorePerm::Lock)
             .context(ks_err!("caller missing Lock permission"))?;
         SUPER_KEY.write().unwrap().wipe_all_unlocked_device_required_keys(user_id as u32);

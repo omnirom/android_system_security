@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
-
 #include "certificate_utils.h"
+#include <gtest/gtest.h>
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -231,6 +230,72 @@ static std::string paramsToStringRsa(testing::TestParamInfo<RsaParams> param) {
     return s.str();
 }
 
+static std::optional<std::vector<uint8_t>> EncodeX509Algor(const X509_ALGOR* alg) {
+    uint8_t* der = nullptr;
+    int der_len = i2d_X509_ALGOR(alg, &der);
+    if (der_len < 0) {
+        return std::nullopt;
+    }
+    std::vector<uint8_t> ret(der, der + der_len);
+    OPENSSL_free(der);
+    return ret;
+}
+
+// `x509_verify` not working with RSA-PSS & SHA1/SHA224 digests. so, manually
+// verify the certificate with RSA-PSS & SHA1/SHA224 digests.
+// BoringSSL after https://boringssl-review.googlesource.com/c/boringssl/+/53865
+// does not support RSA-PSS with SHA1/SHA224 digests.
+static void verifyCertFieldsExplicitly(X509* cert, Digest digest) {
+    // RSA-PSS-SHA1 AlgorithmIdentifier DER encoded value
+    const std::vector<uint8_t> expected_rsa_pss_sha1 = {
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a, 0x30, 0x00,
+    };
+    // RSA-PSS-SHA224 AlgorithmIdentifier DER encoded value
+    const std::vector<uint8_t> expected_rsa_pss_sha224 = {
+        0x30, 0x41, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a, 0x30,
+        0x34, 0xa0, 0x0f, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04,
+        0x02, 0x04, 0x05, 0x00, 0xa1, 0x1c, 0x30, 0x1a, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+        0xf7, 0x0d, 0x01, 0x01, 0x08, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65,
+        0x03, 0x04, 0x02, 0x04, 0x05, 0x00, 0xa2, 0x03, 0x02, 0x01, 0x1c,
+    };
+    const X509_ALGOR* alg;
+    const ASN1_BIT_STRING* sig;
+    const EVP_MD* evp_digest;
+    X509_get0_signature(&sig, &alg, cert);
+    auto encoded = EncodeX509Algor(alg);
+    ASSERT_TRUE(encoded);
+
+    // Check the AlgorithmIdentifiers.
+    if (digest == Digest::SHA1) {
+        evp_digest = EVP_sha1();
+        EXPECT_EQ(encoded.value(), expected_rsa_pss_sha1);
+    } else if (digest == Digest::SHA224) {
+        evp_digest = EVP_sha224();
+        EXPECT_EQ(encoded.value(), expected_rsa_pss_sha224);
+    } else {
+        GTEST_FAIL()
+            << "Error: This is expected to be used only for RSA-PSS with SHA1/SHA224 as digests";
+    }
+
+    // Check the signature.
+    EVP_PKEY_Ptr pubkey(X509_get_pubkey(cert));
+    ASSERT_TRUE(pubkey);
+
+    uint8_t* tbs = nullptr;
+    int tbs_len = i2d_X509_tbs(cert, &tbs);
+    ASSERT_GT(tbs_len, 0);
+
+    size_t sig_len;
+    ASSERT_TRUE(ASN1_BIT_STRING_num_bytes(sig, &sig_len));
+    EVP_PKEY_CTX* pctx;
+    bssl::ScopedEVP_MD_CTX ctx;
+    ASSERT_TRUE(EVP_DigestVerifyInit(ctx.get(), &pctx, evp_digest, nullptr, pubkey.get()));
+    ASSERT_TRUE(EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING));
+    // The salt length should match the digest length.
+    ASSERT_TRUE(EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, -1));
+    EXPECT_TRUE(EVP_DigestVerify(ctx.get(), ASN1_STRING_get0_data(sig), sig_len, tbs, tbs_len));
+}
+
 INSTANTIATE_TEST_SUITE_P(CertSigningWithCallbackRsa, CertificateUtilsWithRsa,
                          testing::Combine(testing::ValuesIn(rsa_key_sizes),
                                           testing::ValuesIn(rsa_paddings),
@@ -315,10 +380,10 @@ TEST_P(CertificateUtilsWithRsa, CertSigningWithCallbackRsa) {
     EVP_PKEY_Ptr decoded_pkey(X509_get_pubkey(decoded_cert.get()));
     if ((padding == Padding::PSS) && (digest == Digest::SHA1 || digest == Digest::SHA224)) {
         // BoringSSL after https://boringssl-review.googlesource.com/c/boringssl/+/53865
-        // does not support these PSS combinations, so skip certificate verification for them
-        // and just check _something_ was returned.
+        // does not support these PSS combinations, so verify these certificates manually.
         EXPECT_NE(decoded_cert.get(), nullptr);
         EXPECT_NE(decoded_pkey.get(), nullptr);
+        verifyCertFieldsExplicitly(decoded_cert.get(), digest);
     } else {
         ASSERT_TRUE(X509_verify(decoded_cert.get(), decoded_pkey.get()));
     }

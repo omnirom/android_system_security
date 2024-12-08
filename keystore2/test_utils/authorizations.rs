@@ -360,6 +360,15 @@ impl AuthSetBuilder {
         });
         self
     }
+
+    /// Set unlocked-device-required
+    pub fn unlocked_device_required(mut self) -> Self {
+        self.0.push(KeyParameter {
+            tag: Tag::UNLOCKED_DEVICE_REQUIRED,
+            value: KeyParameterValue::BoolValue(true),
+        });
+        self
+    }
 }
 
 impl Deref for AuthSetBuilder {

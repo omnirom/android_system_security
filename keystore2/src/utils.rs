@@ -38,16 +38,23 @@ use android_security_apc::aidl::android::security::apc::{
 };
 use android_system_keystore2::aidl::android::system::keystore2::{
     Authorization::Authorization, Domain::Domain, KeyDescriptor::KeyDescriptor,
+    ResponseCode::ResponseCode,
 };
 use anyhow::{Context, Result};
-use binder::{Strong, ThreadState};
+use binder::{FromIBinder, StatusCode, Strong, ThreadState};
 use keystore2_apc_compat::{
     ApcCompatUiOptions, APC_COMPAT_ERROR_ABORTED, APC_COMPAT_ERROR_CANCELLED,
     APC_COMPAT_ERROR_IGNORED, APC_COMPAT_ERROR_OK, APC_COMPAT_ERROR_OPERATION_PENDING,
     APC_COMPAT_ERROR_SYSTEM_ERROR,
 };
 use keystore2_crypto::{aes_gcm_decrypt, aes_gcm_encrypt, ZVec};
+use log::{info, warn};
 use std::iter::IntoIterator;
+use std::thread::sleep;
+use std::time::Duration;
+
+#[cfg(test)]
+mod tests;
 
 /// Per RFC 5280 4.1.2.5, an undefined expiration (not-after) field should be set to GeneralizedTime
 /// 999912312359559, which is 253402300799000 ms from Jan 1, 1970.
@@ -119,14 +126,20 @@ pub fn is_device_id_attestation_tag(tag: Tag) -> bool {
 /// identifiers. It throws an error if the permissions cannot be verified or if the caller doesn't
 /// have the right permissions. Otherwise it returns silently.
 pub fn check_device_attestation_permissions() -> anyhow::Result<()> {
-    check_android_permission("android.permission.READ_PRIVILEGED_PHONE_STATE")
+    check_android_permission(
+        "android.permission.READ_PRIVILEGED_PHONE_STATE",
+        Error::Km(ErrorCode::CANNOT_ATTEST_IDS),
+    )
 }
 
 /// This function checks whether the calling app has the Android permissions needed to attest the
 /// device-unique identifier. It throws an error if the permissions cannot be verified or if the
 /// caller doesn't have the right permissions. Otherwise it returns silently.
 pub fn check_unique_id_attestation_permissions() -> anyhow::Result<()> {
-    check_android_permission("android.permission.REQUEST_UNIQUE_ID_ATTESTATION")
+    check_android_permission(
+        "android.permission.REQUEST_UNIQUE_ID_ATTESTATION",
+        Error::Km(ErrorCode::CANNOT_ATTEST_IDS),
+    )
 }
 
 /// This function checks whether the calling app has the Android permissions needed to manage
@@ -135,16 +148,24 @@ pub fn check_unique_id_attestation_permissions() -> anyhow::Result<()> {
 /// It throws an error if the permissions cannot be verified or if the caller doesn't
 /// have the right permissions. Otherwise it returns silently.
 pub fn check_get_app_uids_affected_by_sid_permissions() -> anyhow::Result<()> {
-    check_android_permission("android.permission.MANAGE_USERS")
+    check_android_permission(
+        "android.permission.MANAGE_USERS",
+        Error::Km(ErrorCode::CANNOT_ATTEST_IDS),
+    )
 }
 
-fn check_android_permission(permission: &str) -> anyhow::Result<()> {
+/// This function checks whether the calling app has the Android permission needed to dump
+/// Keystore state to logcat.
+pub fn check_dump_permission() -> anyhow::Result<()> {
+    check_android_permission("android.permission.DUMP", Error::Rc(ResponseCode::PERMISSION_DENIED))
+}
+
+fn check_android_permission(permission: &str, err: Error) -> anyhow::Result<()> {
     let permission_controller: Strong<dyn IPermissionController::IPermissionController> =
         binder::get_interface("permission")?;
 
     let binder_result = {
-        let _wp =
-            watchdog::watch("In check_device_attestation_permissions: calling checkPermission.");
+        let _wp = watchdog::watch("check_android_permission: calling checkPermission");
         permission_controller.checkPermission(
             permission,
             ThreadState::get_calling_pid(),
@@ -155,8 +176,7 @@ fn check_android_permission(permission: &str) -> anyhow::Result<()> {
         map_binder_status(binder_result).context(ks_err!("checkPermission failed"))?;
     match has_permissions {
         true => Ok(()),
-        false => Err(Error::Km(ErrorCode::CANNOT_ATTEST_IDS))
-            .context(ks_err!("caller does not have the permission to attest device IDs")),
+        false => Err(err).context(ks_err!("caller does not have the '{permission}' permission")),
     }
 }
 
@@ -261,7 +281,9 @@ where
     log::debug!("import parameters={import_params:?}");
 
     let creation_result = {
-        let _wp = watchdog::watch("In utils::import_keyblob_and_perform_op: calling importKey.");
+        let _wp = watchdog::watch(
+            "utils::import_keyblob_and_perform_op: calling IKeyMintDevice::importKey",
+        );
         map_km_error(km_dev.importKey(&import_params, format, &key_material, None))
     }
     .context(ks_err!("Upgrade failed."))?;
@@ -301,7 +323,9 @@ where
     NewBlobHandler: FnOnce(&[u8]) -> Result<()>,
 {
     let upgraded_blob = {
-        let _wp = watchdog::watch("In utils::upgrade_keyblob_and_perform_op: calling upgradeKey.");
+        let _wp = watchdog::watch(
+            "utils::upgrade_keyblob_and_perform_op: calling IKeyMintDevice::upgradeKey.",
+        );
         map_km_error(km_dev.upgradeKey(key_blob, upgrade_params))
     }
     .context(ks_err!("Upgrade failed."))?;
@@ -513,7 +537,9 @@ fn merge_and_filter_key_entry_lists(
     result
 }
 
-fn estimate_safe_amount_to_return(
+pub(crate) fn estimate_safe_amount_to_return(
+    domain: Domain,
+    namespace: i64,
     key_descriptors: &[KeyDescriptor],
     response_size_limit: usize,
 ) -> usize {
@@ -538,11 +564,9 @@ fn estimate_safe_amount_to_return(
         // 350KB and return a partial list.
         if returned_bytes > response_size_limit {
             log::warn!(
-                "Key descriptors list ({} items) may exceed binder \
-                       size, returning {} items est {} bytes.",
+                "{domain:?}:{namespace}: Key descriptors list ({} items) may exceed binder \
+                       size, returning {items_to_return} items est {returned_bytes} bytes.",
                 key_descriptors.len(),
-                items_to_return,
-                returned_bytes
             );
             break;
         }
@@ -550,6 +574,9 @@ fn estimate_safe_amount_to_return(
     }
     items_to_return
 }
+
+/// Estimate for maximum size of a Binder response in bytes.
+pub(crate) const RESPONSE_SIZE_LIMIT: usize = 358400;
 
 /// List all key aliases for a given domain + namespace. whose alias is greater
 /// than start_past_alias (if provided).
@@ -574,9 +601,8 @@ pub fn list_key_entries(
         start_past_alias,
     );
 
-    const RESPONSE_SIZE_LIMIT: usize = 358400;
     let safe_amount_to_return =
-        estimate_safe_amount_to_return(&merged_key_entries, RESPONSE_SIZE_LIMIT);
+        estimate_safe_amount_to_return(domain, namespace, &merged_key_entries, RESPONSE_SIZE_LIMIT);
     Ok(merged_key_entries[..safe_amount_to_return].to_vec())
 }
 
@@ -589,6 +615,15 @@ pub fn count_key_entries(db: &mut KeystoreDB, domain: Domain, namespace: i64) ->
     let num_keys_in_db = db.count_keys(domain, namespace, KeyType::Client)?;
 
     Ok((legacy_keys.len() + num_keys_in_db) as i32)
+}
+
+/// For params remove sensitive data before returning a string for logging
+pub fn log_security_safe_params(params: &[KmKeyParameter]) -> Vec<KmKeyParameter> {
+    params
+        .iter()
+        .filter(|kp| (kp.tag != Tag::APPLICATION_ID && kp.tag != Tag::APPLICATION_DATA))
+        .cloned()
+        .collect::<Vec<KmKeyParameter>>()
 }
 
 /// Trait implemented by objects that can be used to decrypt cipher text using AES-GCM.
@@ -620,100 +655,24 @@ impl<T: AesGcmKey> AesGcm for T {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result;
+pub(crate) fn retry_get_interface<T: FromIBinder + ?Sized>(
+    name: &str,
+) -> Result<Strong<T>, StatusCode> {
+    let retry_count = if cfg!(early_vm) { 5 } else { 1 };
 
-    #[test]
-    fn check_device_attestation_permissions_test() -> Result<()> {
-        check_device_attestation_permissions().or_else(|error| {
-            match error.root_cause().downcast_ref::<Error>() {
-                // Expected: the context for this test might not be allowed to attest device IDs.
-                Some(Error::Km(ErrorCode::CANNOT_ATTEST_IDS)) => Ok(()),
-                // Other errors are unexpected
-                _ => Err(error),
+    let mut wait_time = Duration::from_secs(5);
+    for i in 1..retry_count {
+        match binder::get_interface(name) {
+            Ok(res) => return Ok(res),
+            Err(e) => {
+                warn!("failed to get interface {name}. Retry {i}/{retry_count}: {e:?}");
+                sleep(wait_time);
+                wait_time *= 2;
             }
-        })
+        }
     }
-
-    fn create_key_descriptors_from_aliases(key_aliases: &[&str]) -> Vec<KeyDescriptor> {
-        key_aliases
-            .iter()
-            .map(|key_alias| KeyDescriptor {
-                domain: Domain::APP,
-                nspace: 0,
-                alias: Some(key_alias.to_string()),
-                blob: None,
-            })
-            .collect::<Vec<KeyDescriptor>>()
+    if retry_count > 1 {
+        info!("{retry_count}-th (last) retry to get interface: {name}");
     }
-
-    fn aliases_from_key_descriptors(key_descriptors: &[KeyDescriptor]) -> Vec<String> {
-        key_descriptors
-            .iter()
-            .map(
-                |kd| {
-                    if let Some(alias) = &kd.alias {
-                        String::from(alias)
-                    } else {
-                        String::from("")
-                    }
-                },
-            )
-            .collect::<Vec<String>>()
-    }
-
-    #[test]
-    fn test_safe_amount_to_return() -> Result<()> {
-        let key_aliases = vec!["key1", "key2", "key3"];
-        let key_descriptors = create_key_descriptors_from_aliases(&key_aliases);
-
-        assert_eq!(estimate_safe_amount_to_return(&key_descriptors, 20), 1);
-        assert_eq!(estimate_safe_amount_to_return(&key_descriptors, 50), 2);
-        assert_eq!(estimate_safe_amount_to_return(&key_descriptors, 100), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn test_merge_and_sort_lists_without_filtering() -> Result<()> {
-        let legacy_key_aliases = vec!["key_c", "key_a", "key_b"];
-        let legacy_key_descriptors = create_key_descriptors_from_aliases(&legacy_key_aliases);
-        let db_key_aliases = vec!["key_a", "key_d"];
-        let db_key_descriptors = create_key_descriptors_from_aliases(&db_key_aliases);
-        let result =
-            merge_and_filter_key_entry_lists(&legacy_key_descriptors, &db_key_descriptors, None);
-        assert_eq!(aliases_from_key_descriptors(&result), vec!["key_a", "key_b", "key_c", "key_d"]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_merge_and_sort_lists_with_filtering() -> Result<()> {
-        let legacy_key_aliases = vec!["key_f", "key_a", "key_e", "key_b"];
-        let legacy_key_descriptors = create_key_descriptors_from_aliases(&legacy_key_aliases);
-        let db_key_aliases = vec!["key_c", "key_g"];
-        let db_key_descriptors = create_key_descriptors_from_aliases(&db_key_aliases);
-        let result = merge_and_filter_key_entry_lists(
-            &legacy_key_descriptors,
-            &db_key_descriptors,
-            Some("key_b"),
-        );
-        assert_eq!(aliases_from_key_descriptors(&result), vec!["key_c", "key_e", "key_f", "key_g"]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_merge_and_sort_lists_with_filtering_and_dups() -> Result<()> {
-        let legacy_key_aliases = vec!["key_f", "key_a", "key_e", "key_b"];
-        let legacy_key_descriptors = create_key_descriptors_from_aliases(&legacy_key_aliases);
-        let db_key_aliases = vec!["key_d", "key_e", "key_g"];
-        let db_key_descriptors = create_key_descriptors_from_aliases(&db_key_aliases);
-        let result = merge_and_filter_key_entry_lists(
-            &legacy_key_descriptors,
-            &db_key_descriptors,
-            Some("key_c"),
-        );
-        assert_eq!(aliases_from_key_descriptors(&result), vec!["key_d", "key_e", "key_f", "key_g"]);
-        Ok(())
-    }
+    binder::get_interface(name)
 }

@@ -31,6 +31,7 @@
 //!  * `abort` is called.
 //!  * The operation gets dropped.
 //!  * The operation gets pruned.
+//!
 //! `Operation` has an `Outcome` member. While the outcome is `Outcome::Unknown`,
 //! the operation is active and in a good state. Any of the above conditions may
 //! change the outcome to one of the defined outcomes Success, Abort, Dropped,
@@ -286,7 +287,7 @@ impl Operation {
         }
         *locked_outcome = Outcome::Pruned;
 
-        let _wp = wd::watch("In Operation::prune: calling abort()");
+        let _wp = wd::watch("Operation::prune: calling IKeyMintOperation::abort()");
 
         // We abort the operation. If there was an error we log it but ignore it.
         if let Err(e) = map_km_error(self.km_op.abort()) {
@@ -362,7 +363,7 @@ impl Operation {
             .context(ks_err!("Trying to get auth tokens."))?;
 
         self.update_outcome(&mut outcome, {
-            let _wp = wd::watch("Operation::update_aad: calling updateAad");
+            let _wp = wd::watch("Operation::update_aad: calling IKeyMintOperation::updateAad");
             map_km_error(self.km_op.updateAad(aad_input, hat.as_ref(), tst.as_ref()))
         })
         .context(ks_err!("Update failed."))?;
@@ -386,7 +387,7 @@ impl Operation {
 
         let output = self
             .update_outcome(&mut outcome, {
-                let _wp = wd::watch("Operation::update: calling update");
+                let _wp = wd::watch("Operation::update: calling IKeyMintOperation::update");
                 map_km_error(self.km_op.update(input, hat.as_ref(), tst.as_ref()))
             })
             .context(ks_err!("Update failed."))?;
@@ -416,7 +417,7 @@ impl Operation {
 
         let output = self
             .update_outcome(&mut outcome, {
-                let _wp = wd::watch("Operation::finish: calling finish");
+                let _wp = wd::watch("Operation::finish: calling IKeyMintOperation::finish");
                 map_km_error(self.km_op.finish(
                     input,
                     signature,
@@ -447,7 +448,7 @@ impl Operation {
         *locked_outcome = outcome;
 
         {
-            let _wp = wd::watch("Operation::abort: calling abort");
+            let _wp = wd::watch("Operation::abort: calling IKeyMintOperation::abort");
             map_km_error(self.km_op.abort()).context(ks_err!("KeyMint::abort failed."))
         }
     }

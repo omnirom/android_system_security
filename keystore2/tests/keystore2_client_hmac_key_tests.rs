@@ -12,23 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::keystore2_client_test_utils::perform_sample_sign_operation;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, Digest::Digest, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
-    SecurityLevel::SecurityLevel,
 };
 use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
+    Domain::Domain, KeyDescriptor::KeyDescriptor,
 };
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
-use crate::keystore2_client_test_utils::perform_sample_sign_operation;
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
 
 /// Generate HMAC key with given parameters and perform a sample operation using generated key.
 fn create_hmac_key_and_operation(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     alias: &str,
     key_size: i32,
     mac_len: i32,
@@ -36,9 +31,9 @@ fn create_hmac_key_and_operation(
     digest: Digest,
 ) -> Result<(), binder::Status> {
     let key_metadata =
-        key_generations::generate_hmac_key(sec_level, alias, key_size, min_mac_len, digest)?;
+        key_generations::generate_hmac_key(sl, alias, key_size, min_mac_len, digest)?;
 
-    let op_response = sec_level.createOperation(
+    let op_response = sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
@@ -69,22 +64,14 @@ fn keystore2_hmac_key_op_success() {
     let mac_len = 128;
     let key_size = 128;
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for digest in digests {
         let alias = format!("ks_hmac_test_key_{}", digest.0);
 
         assert_eq!(
             Ok(()),
-            create_hmac_key_and_operation(
-                &sec_level,
-                &alias,
-                key_size,
-                mac_len,
-                min_mac_len,
-                digest,
-            )
+            create_hmac_key_and_operation(&sl, &alias, key_size, mac_len, min_mac_len, digest,)
         );
     }
 }
@@ -96,13 +83,12 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_key_size() {
     let min_mac_len = 256;
     let digest = Digest::SHA_2_256;
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for key_size in 0..513 {
         let alias = format!("ks_hmac_test_key_{}", key_size);
         let result = key_generations::map_ks_error(key_generations::generate_hmac_key(
-            &sec_level,
+            &sl,
             &alias,
             key_size,
             min_mac_len,
@@ -128,13 +114,12 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_min_mac_length() {
     let digest = Digest::SHA_2_256;
     let key_size = 128;
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for min_mac_len in 0..257 {
         let alias = format!("ks_hmac_test_key_mml_{}", min_mac_len);
         match key_generations::map_ks_error(key_generations::generate_hmac_key(
-            &sec_level,
+            &sl,
             &alias,
             key_size,
             min_mac_len,
@@ -159,8 +144,7 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_min_mac_length() {
 /// Test fails to generate a key with multiple digests with an error code `UNSUPPORTED_DIGEST`.
 #[test]
 fn keystore2_hmac_gen_key_multi_digests_fails_expect_unsupported_digest() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = "ks_hmac_test_key_multi_dig";
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -173,7 +157,7 @@ fn keystore2_hmac_gen_key_multi_digests_fails_expect_unsupported_digest() {
         .digest(Digest::SHA1)
         .digest(Digest::SHA_2_256);
 
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,
@@ -193,8 +177,7 @@ fn keystore2_hmac_gen_key_multi_digests_fails_expect_unsupported_digest() {
 /// no digest should fail with an error code `UNSUPPORTED_DIGEST`.
 #[test]
 fn keystore2_hmac_gen_key_no_digests_fails_expect_unsupported_digest() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = "ks_hmac_test_key_no_dig";
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -205,7 +188,7 @@ fn keystore2_hmac_gen_key_no_digests_fails_expect_unsupported_digest() {
         .key_size(128)
         .min_mac_length(128);
 
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::APP,
             nspace: -1,
@@ -227,12 +210,11 @@ fn keystore2_hmac_gen_key_no_digests_fails_expect_unsupported_digest() {
 fn keystore2_hmac_gen_key_with_none_digest_fails_expect_unsupported_digest() {
     let min_mac_len = 128;
     let key_size = 128;
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = "ks_hmac_test_key_fail";
     let result = key_generations::map_ks_error(key_generations::generate_hmac_key(
-        &sec_level,
+        &sl,
         alias,
         key_size,
         min_mac_len,
@@ -253,14 +235,13 @@ fn keystore2_hmac_key_op_with_mac_len_greater_than_digest_len_fail() {
     let mac_len = 256;
     let key_size = 128;
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for digest in digests {
         let alias = format!("ks_hmac_test_key_{}", digest.0);
 
         let result = key_generations::map_ks_error(create_hmac_key_and_operation(
-            &sec_level,
+            &sl,
             &alias,
             key_size,
             mac_len,
@@ -284,14 +265,13 @@ fn keystore2_hmac_key_op_with_mac_len_less_than_min_mac_len_fail() {
     let mac_len = 64;
     let key_size = 128;
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for digest in digests {
         let alias = format!("ks_hmac_test_key_{}", digest.0);
 
         let result = key_generations::map_ks_error(create_hmac_key_and_operation(
-            &sec_level,
+            &sl,
             &alias,
             key_size,
             mac_len,

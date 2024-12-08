@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::{getuid, Gid, Uid};
-use rustutils::users::AID_USER_OFFSET;
-
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     ErrorCode::ErrorCode, SecurityLevel::SecurityLevel,
 };
@@ -22,8 +19,11 @@ use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
     ResponseCode::ResponseCode,
 };
-
-use keystore2_test_utils::{get_keystore_service, key_generations, key_generations::Error, run_as};
+use keystore2_test_utils::{
+    get_keystore_service, key_generations, key_generations::Error, run_as, SecLevel,
+};
+use nix::unistd::{getuid, Gid, Uid};
+use rustutils::users::AID_USER_OFFSET;
 
 /// Generate a key and update its public certificate and certificate chain. Test should be able to
 /// load the key and able to verify whether its certificate and cert-chain are updated successfully.
@@ -31,11 +31,10 @@ use keystore2_test_utils::{get_keystore_service, key_generations, key_generation
 fn keystore2_update_subcomponent_success() {
     let alias = "update_subcomponent_success_key";
 
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::SELINUX,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias.to_string()),
@@ -46,11 +45,11 @@ fn keystore2_update_subcomponent_success() {
     let other_cert: [u8; 32] = [123; 32];
     let other_cert_chain: [u8; 32] = [12; 32];
 
-    keystore2
+    sl.keystore2
         .updateSubcomponent(&key_metadata.key, Some(&other_cert), Some(&other_cert_chain))
         .expect("updateSubcomponent should have succeeded.");
 
-    let key_entry_response = keystore2.getKeyEntry(&key_metadata.key).unwrap();
+    let key_entry_response = sl.keystore2.getKeyEntry(&key_metadata.key).unwrap();
     assert_eq!(Some(other_cert.to_vec()), key_entry_response.metadata.certificate);
     assert_eq!(Some(other_cert_chain.to_vec()), key_entry_response.metadata.certificateChain);
 }
@@ -170,13 +169,12 @@ fn keystore2_update_subcomponent_fails_permission_denied() {
     // SAFETY: The test is run in a separate process with no other threads.
     let mut granted_keys = unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
             let alias = format!("ks_update_subcompo_test_1_{}", getuid());
             let mut granted_keys = Vec::new();
 
             let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::APP,
                 -1,
                 Some(alias),
@@ -186,7 +184,8 @@ fn keystore2_update_subcomponent_fails_permission_denied() {
 
             // Grant a key without update permission.
             let access_vector = KeyPermission::GET_INFO.0;
-            let granted_key = keystore2
+            let granted_key = sl
+                .keystore2
                 .grant(&key_metadata.key, GRANTEE_1_UID.try_into().unwrap(), access_vector)
                 .unwrap();
             assert_eq!(granted_key.domain, Domain::GRANT);
@@ -194,7 +193,8 @@ fn keystore2_update_subcomponent_fails_permission_denied() {
 
             // Grant a key with update permission.
             let access_vector = KeyPermission::GET_INFO.0 | KeyPermission::UPDATE.0;
-            let granted_key = keystore2
+            let granted_key = sl
+                .keystore2
                 .grant(&key_metadata.key, GRANTEE_2_UID.try_into().unwrap(), access_vector)
                 .unwrap();
             assert_eq!(granted_key.domain, Domain::GRANT);

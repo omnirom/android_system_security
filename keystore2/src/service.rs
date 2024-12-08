@@ -62,11 +62,18 @@ impl KeystoreService {
         id_rotation_state: IdRotationState,
     ) -> Result<Strong<dyn IKeystoreService>> {
         let mut result: Self = Default::default();
-        let (dev, uuid) = KeystoreSecurityLevel::new_native_binder(
+        let (dev, uuid) = match KeystoreSecurityLevel::new_native_binder(
             SecurityLevel::TRUSTED_ENVIRONMENT,
             id_rotation_state.clone(),
-        )
-        .context(ks_err!("Trying to construct mandatory security level TEE."))?;
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to construct mandatory security level TEE: {e:?}");
+                log::error!("Does the device have a /default Keymaster or KeyMint instance?");
+                return Err(e.context(ks_err!("Trying to construct mandatory security level TEE")));
+            }
+        };
+
         result.i_sec_level_by_uuid.insert(uuid, dev);
         result.uuid_by_sec_level.insert(SecurityLevel::TRUSTED_ENVIRONMENT, uuid);
 
@@ -381,9 +388,7 @@ impl IKeystoreService for KeystoreService {
         &self,
         security_level: SecurityLevel,
     ) -> binder::Result<Strong<dyn IKeystoreSecurityLevel>> {
-        let _wp = wd::watch_millis_with("IKeystoreService::getSecurityLevel", 500, move || {
-            format!("security_level: {}", security_level.0)
-        });
+        let _wp = wd::watch_millis_with("IKeystoreService::getSecurityLevel", 500, security_level);
         self.get_security_level(security_level).map_err(into_logged_binder)
     }
     fn getKeyEntry(&self, key: &KeyDescriptor) -> binder::Result<KeyEntryResponse> {

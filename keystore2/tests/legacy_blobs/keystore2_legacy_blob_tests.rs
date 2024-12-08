@@ -12,35 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::{getuid, Gid, Uid};
-use rustutils::users::AID_USER_OFFSET;
-use serde::{Deserialize, Serialize};
-
-use std::ops::Deref;
-use std::path::PathBuf;
-
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::SecurityLevel;
-
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, KeyDescriptor::KeyDescriptor,
-};
-
-use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::IKeystoreMaintenance;
-
 use android_security_authorization::aidl::android::security::authorization::{
     IKeystoreAuthorization::IKeystoreAuthorization,
 };
-
+use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::IKeystoreMaintenance;
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, KeyDescriptor::KeyDescriptor,
+};
 use keystore2::key_parameter::KeyParameter as KsKeyparameter;
 use keystore2::legacy_blob::test_utils::legacy_blob_test_vectors::*;
 use keystore2::legacy_blob::test_utils::*;
 use keystore2::legacy_blob::LegacyKeyCharacteristics;
 use keystore2::utils::AesGcm;
 use keystore2_crypto::{Password, ZVec};
-
-use keystore2_test_utils::get_keystore_service;
-use keystore2_test_utils::key_generations;
-use keystore2_test_utils::run_as;
+use keystore2_test_utils::{get_keystore_service, key_generations, run_as, SecLevel};
+use nix::unistd::{getuid, Gid, Uid};
+use rustutils::users::AID_USER_OFFSET;
+use serde::{Deserialize, Serialize};
+use std::ops::Deref;
+use std::path::PathBuf;
 
 static USER_MANAGER_SERVICE_NAME: &str = "android.security.maintenance";
 static AUTH_SERVICE_NAME: &str = "android.security.authorization";
@@ -160,15 +151,12 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                     println!("onUserRemoved error: {:#?}", e);
                 }
             }
+            let sl = SecLevel::tee();
 
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2
-                .getSecurityLevel(SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT)
-                .unwrap();
             // Generate Key BLOB and prepare legacy keystore blob files.
             let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
             let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::BLOB,
                 SELINUX_SHELL_NAMESPACE,
                 None,
@@ -412,14 +400,11 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                 }
             }
 
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2
-                .getSecurityLevel(SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT)
-                .unwrap();
+            let sl = SecLevel::tee();
             // Generate Key BLOB and prepare legacy keystore blob files.
             let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
             let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::BLOB,
                 SELINUX_SHELL_NAMESPACE,
                 None,

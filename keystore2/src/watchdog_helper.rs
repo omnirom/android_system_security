@@ -17,8 +17,7 @@
 /// This module provides helpers for simplified use of the watchdog module.
 #[cfg(feature = "watchdog")]
 pub mod watchdog {
-    use lazy_static::lazy_static;
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
     use std::time::Duration;
     pub use watchdog_rs::WatchPoint;
     use watchdog_rs::Watchdog;
@@ -28,10 +27,8 @@ pub mod watchdog {
 
     const DEFAULT_TIMEOUT: Duration = Duration::from_millis(DEFAULT_TIMEOUT_MS);
 
-    lazy_static! {
-        /// A Watchdog thread, that can be used to create watch points.
-        static ref WD: Arc<Watchdog> = Watchdog::new(Duration::from_secs(10));
-    }
+    /// A Watchdog thread, that can be used to create watch points.
+    static WD: LazyLock<Arc<Watchdog>> = LazyLock::new(|| Watchdog::new(Duration::from_secs(10)));
 
     /// Sets a watch point with `id` and a timeout of `millis` milliseconds.
     pub fn watch_millis(id: &'static str, millis: u64) -> Option<WatchPoint> {
@@ -43,14 +40,14 @@ pub mod watchdog {
         Watchdog::watch(&WD, id, DEFAULT_TIMEOUT)
     }
 
-    /// Like `watch_millis` but with a callback that is called every time a report
-    /// is printed about this watch point.
+    /// Like `watch_millis` but with context that is included every time a report is printed about
+    /// this watch point.
     pub fn watch_millis_with(
         id: &'static str,
         millis: u64,
-        callback: impl Fn() -> String + Send + 'static,
+        context: impl std::fmt::Debug + Send + 'static,
     ) -> Option<WatchPoint> {
-        Watchdog::watch_with(&WD, id, Duration::from_millis(millis), callback)
+        Watchdog::watch_with(&WD, id, Duration::from_millis(millis), context)
     }
 }
 
@@ -71,7 +68,7 @@ pub mod watchdog {
     pub fn watch_millis_with(
         _: &'static str,
         _: u64,
-        _: impl Fn() -> String + Send + 'static,
+        _: impl std::fmt::Debug + Send + 'static,
     ) -> Option<WatchPoint> {
         None
     }

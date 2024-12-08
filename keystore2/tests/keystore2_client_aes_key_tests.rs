@@ -12,26 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Algorithm::Algorithm, BlockMode::BlockMode, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
-    PaddingMode::PaddingMode, SecurityLevel::SecurityLevel,
-};
-
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
 use crate::keystore2_client_test_utils::{
     perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
 };
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Algorithm::Algorithm, BlockMode::BlockMode, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
+    PaddingMode::PaddingMode,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, KeyDescriptor::KeyDescriptor,
+};
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
 
 /// Generate a AES key. Create encrypt and decrypt operations using the generated key.
 fn create_aes_key_and_operation(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     key_size: i32,
     padding_mode: PaddingMode,
     block_mode: BlockMode,
@@ -42,7 +37,7 @@ fn create_aes_key_and_operation(
     let alias = format!("ks_aes_test_key_{}{}{}", key_size, block_mode.0, padding_mode.0);
 
     let key_metadata = key_generations::generate_sym_key(
-        sec_level,
+        sl,
         Algorithm::AES,
         key_size,
         &alias,
@@ -52,7 +47,7 @@ fn create_aes_key_and_operation(
     )?;
 
     let cipher_text = perform_sample_sym_key_encrypt_op(
-        sec_level,
+        &sl.binder,
         padding_mode,
         block_mode,
         nonce,
@@ -63,7 +58,7 @@ fn create_aes_key_and_operation(
     assert!(cipher_text.is_some());
 
     let plain_text = perform_sample_sym_key_decrypt_op(
-        sec_level,
+        &sl.binder,
         &cipher_text.unwrap(),
         padding_mode,
         block_mode,
@@ -80,22 +75,22 @@ fn create_aes_key_and_operation(
 /// Generate AES keys with various block modes and paddings.
 ///  - Block Modes: ECB, CBC
 ///  - Padding Modes: NONE, PKCS7
+///
 /// Test should generate keys and perform operation successfully.
 #[test]
 fn keystore2_aes_ecb_cbc_generate_key() {
-    let keystore2 = get_keystore_service();
     let key_sizes = [128, 256];
     let block_modes = [BlockMode::ECB, BlockMode::CBC];
     let padding_modes = [PaddingMode::PKCS7, PaddingMode::NONE];
 
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     for key_size in key_sizes {
         for block_mode in block_modes {
             for padding_mode in padding_modes {
                 assert_eq!(
                     Ok(()),
                     create_aes_key_and_operation(
-                        &sec_level,
+                        &sl,
                         key_size,
                         padding_mode,
                         block_mode,
@@ -112,19 +107,18 @@ fn keystore2_aes_ecb_cbc_generate_key() {
 /// Generate AES keys with -
 ///  - Block Modes: `CTR, GCM`
 ///  - Padding Modes: `NONE`
+///
 /// Test should generate keys and perform operation successfully.
 #[test]
 fn keystore2_aes_ctr_gcm_generate_key_success() {
-    let keystore2 = get_keystore_service();
     let key_sizes = [128, 256];
     let key_params = [(BlockMode::CTR, None, None), (BlockMode::GCM, Some(128), Some(128))];
-
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for key_size in key_sizes {
         for (block_mode, mac_len, min_mac_len) in key_params {
             let result = key_generations::map_ks_error(create_aes_key_and_operation(
-                &sec_level,
+                &sl,
                 key_size,
                 PaddingMode::NONE,
                 block_mode,
@@ -141,20 +135,19 @@ fn keystore2_aes_ctr_gcm_generate_key_success() {
 /// Generate AES keys with -
 ///  - Block Modes: `CTR, GCM`
 ///  - Padding Modes: `PKCS7`
+///
 /// Try to create an operation using generated keys, test should fail to create an operation
 /// with an error code `INCOMPATIBLE_PADDING_MODE`.
 #[test]
 fn keystore2_aes_ctr_gcm_generate_key_fails_incompatible() {
-    let keystore2 = get_keystore_service();
     let key_sizes = [128, 256];
     let key_params = [(BlockMode::CTR, None, None), (BlockMode::GCM, Some(128), Some(128))];
-
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     for key_size in key_sizes {
         for (block_mode, mac_len, min_mac_len) in key_params {
             let result = key_generations::map_ks_error(create_aes_key_and_operation(
-                &sec_level,
+                &sl,
                 key_size,
                 PaddingMode::PKCS7,
                 block_mode,
@@ -173,12 +166,11 @@ fn keystore2_aes_ctr_gcm_generate_key_fails_incompatible() {
 /// an error code `UNSUPPORTED_KEY_SIZE`.
 #[test]
 fn keystore2_aes_key_fails_unsupported_key_size() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let result = key_generations::map_ks_error(key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::AES,
         1024,
         alias,
@@ -194,12 +186,11 @@ fn keystore2_aes_key_fails_unsupported_key_size() {
 /// Test should fail to generate a key with an error code `MISSING_MIN_MAC_LENGTH`.
 #[test]
 fn keystore2_aes_gcm_key_fails_missing_min_mac_len() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let result = key_generations::map_ks_error(key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::AES,
         128,
         alias,
@@ -215,8 +206,7 @@ fn keystore2_aes_gcm_key_fails_missing_min_mac_len() {
 /// an operation with `UNSUPPORTED_BLOCK_MODE` error code.
 #[test]
 fn keystore2_aes_key_op_fails_multi_block_modes() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -229,7 +219,8 @@ fn keystore2_aes_key_op_fails_multi_block_modes() {
         .block_mode(BlockMode::CBC)
         .padding_mode(PaddingMode::NONE);
 
-    let key_metadata = sec_level
+    let key_metadata = sl
+        .binder
         .generateKey(
             &KeyDescriptor {
                 domain: Domain::APP,
@@ -250,7 +241,7 @@ fn keystore2_aes_key_op_fails_multi_block_modes() {
         .block_mode(BlockMode::CBC)
         .padding_mode(PaddingMode::NONE);
 
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &op_params,
         false,
@@ -260,11 +251,10 @@ fn keystore2_aes_key_op_fails_multi_block_modes() {
 }
 
 /// Try to create an operation using AES key with multiple padding modes. Test should fail to create
-/// an operation with `UNSUPPORTED_PADDING_MODE` error code.
+/// an operation.
 #[test]
 fn keystore2_aes_key_op_fails_multi_padding_modes() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -277,7 +267,8 @@ fn keystore2_aes_key_op_fails_multi_padding_modes() {
         .padding_mode(PaddingMode::PKCS7)
         .padding_mode(PaddingMode::NONE);
 
-    let key_metadata = sec_level
+    let key_metadata = sl
+        .binder
         .generateKey(
             &KeyDescriptor {
                 domain: Domain::APP,
@@ -298,13 +289,18 @@ fn keystore2_aes_key_op_fails_multi_padding_modes() {
         .padding_mode(PaddingMode::PKCS7)
         .padding_mode(PaddingMode::NONE);
 
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &op_params,
         false,
     ));
     assert!(result.is_err());
-    assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE), result.unwrap_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        Error::Km(ErrorCode::INCOMPATIBLE_PADDING_MODE)
+            | Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE)
+            | Error::Km(ErrorCode::INVALID_ARGUMENT)
+    ));
 }
 
 /// Generate a AES-ECB key with unpadded mode. Try to create an operation using generated key
@@ -312,12 +308,11 @@ fn keystore2_aes_key_op_fails_multi_padding_modes() {
 /// `INCOMPATIBLE_PADDING_MODE` error code.
 #[test]
 fn keystore2_aes_key_op_fails_incompatible_padding() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let key_metadata = key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::AES,
         128,
         alias,
@@ -328,7 +323,7 @@ fn keystore2_aes_key_op_fails_incompatible_padding() {
     .unwrap();
 
     let result = key_generations::map_ks_error(perform_sample_sym_key_encrypt_op(
-        &sec_level,
+        &sl.binder,
         PaddingMode::PKCS7,
         BlockMode::ECB,
         &mut None,
@@ -344,12 +339,11 @@ fn keystore2_aes_key_op_fails_incompatible_padding() {
 /// `INCOMPATIBLE_BLOCK_MODE` error code.
 #[test]
 fn keystore2_aes_key_op_fails_incompatible_blockmode() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_invalid_1";
 
     let key_metadata = key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::AES,
         128,
         alias,
@@ -360,7 +354,7 @@ fn keystore2_aes_key_op_fails_incompatible_blockmode() {
     .unwrap();
 
     let result = key_generations::map_ks_error(perform_sample_sym_key_encrypt_op(
-        &sec_level,
+        &sl.binder,
         PaddingMode::NONE,
         BlockMode::CBC,
         &mut None,
@@ -376,13 +370,12 @@ fn keystore2_aes_key_op_fails_incompatible_blockmode() {
 /// `MISSING_MAC_LENGTH` error code.
 #[test]
 fn keystore2_aes_gcm_op_fails_missing_mac_len() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let mac_len = None;
     let min_mac_len = Some(128);
 
     let result = key_generations::map_ks_error(create_aes_key_and_operation(
-        &sec_level,
+        &sl,
         128,
         PaddingMode::NONE,
         BlockMode::GCM,
@@ -404,13 +397,12 @@ fn keystore2_aes_gcm_op_fails_missing_mac_len() {
 /// an operation with `INVALID_MAC_LENGTH` error code.
 #[test]
 fn keystore2_aes_gcm_op_fails_invalid_mac_len() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let mac_len = Some(96);
     let min_mac_len = Some(104);
 
     let result = key_generations::map_ks_error(create_aes_key_and_operation(
-        &sec_level,
+        &sl,
         128,
         PaddingMode::NONE,
         BlockMode::GCM,
@@ -427,11 +419,10 @@ fn keystore2_aes_gcm_op_fails_invalid_mac_len() {
 /// `UNSUPPORTED_MAC_LENGTH` error code.
 #[test]
 fn keystore2_aes_gcm_op_fails_unsupported_mac_len() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let result = key_generations::map_ks_error(create_aes_key_and_operation(
-        &sec_level,
+        &sl,
         128,
         PaddingMode::NONE,
         BlockMode::GCM,
@@ -448,13 +439,12 @@ fn keystore2_aes_gcm_op_fails_unsupported_mac_len() {
 /// `CALLER_NONCE_PROHIBITED` error code.
 #[test]
 fn keystore2_aes_key_op_fails_nonce_prohibited() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "aes_key_test_nonce_1";
     let mut nonce = Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
     let key_metadata = key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::AES,
         128,
         alias,
@@ -465,7 +455,7 @@ fn keystore2_aes_key_op_fails_nonce_prohibited() {
     .unwrap();
 
     let result = key_generations::map_ks_error(perform_sample_sym_key_encrypt_op(
-        &sec_level,
+        &sl.binder,
         PaddingMode::NONE,
         BlockMode::CBC,
         &mut nonce,

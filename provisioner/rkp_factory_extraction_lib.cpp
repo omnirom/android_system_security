@@ -224,7 +224,8 @@ CborResult<Array> composeCertificateRequestV3(const std::vector<uint8_t>& csr) {
 }
 
 CborResult<cppbor::Array> getCsrV3(std::string_view componentName,
-                                   IRemotelyProvisionedComponent* irpc, bool selfTest) {
+                                   IRemotelyProvisionedComponent* irpc, bool selfTest,
+                                   bool allowDegenerate) {
     std::vector<uint8_t> csr;
     std::vector<MacedPublicKey> emptyKeys;
     const std::vector<uint8_t> challenge = generateChallenge();
@@ -237,7 +238,8 @@ CborResult<cppbor::Array> getCsrV3(std::string_view componentName,
     }
 
     if (selfTest) {
-        auto result = verifyFactoryCsr(/*keysToSign=*/cppbor::Array(), csr, irpc, challenge);
+        auto result =
+            verifyFactoryCsr(/*keysToSign=*/cppbor::Array(), csr, irpc, challenge, allowDegenerate);
         if (!result) {
             std::cerr << "Self test failed for IRemotelyProvisionedComponent '" << componentName
                       << "'. Error message: '" << result.message() << "'." << std::endl;
@@ -249,7 +251,7 @@ CborResult<cppbor::Array> getCsrV3(std::string_view componentName,
 }
 
 CborResult<Array> getCsr(std::string_view componentName, IRemotelyProvisionedComponent* irpc,
-                         bool selfTest) {
+                         bool selfTest, bool allowDegenerate) {
     RpcHardwareInfo hwInfo;
     auto status = irpc->getHardwareInfo(&hwInfo);
     if (!status.isOk()) {
@@ -264,7 +266,7 @@ CborResult<Array> getCsr(std::string_view componentName, IRemotelyProvisionedCom
         }
         return getCsrV1(componentName, irpc);
     } else {
-        return getCsrV3(componentName, irpc, selfTest);
+        return getCsrV3(componentName, irpc, selfTest, allowDegenerate);
     }
 }
 

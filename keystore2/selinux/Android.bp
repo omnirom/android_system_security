@@ -34,7 +34,6 @@ rust_library {
 
     rustlibs: [
         "libanyhow",
-        "liblazy_static",
         "liblog_rust",
         "libselinux_bindgen",
         "libthiserror",
@@ -57,7 +56,6 @@ rust_test {
     rustlibs: [
         "libandroid_logger",
         "libanyhow",
-        "liblazy_static",
         "liblog_rust",
         "libselinux_bindgen",
         "libthiserror",
@@ -77,7 +75,6 @@ rust_test {
         "libandroid_logger",
         "libanyhow",
         "libkeystore2_selinux",
-        "liblazy_static",
         "liblog_rust",
         "libnix",
         "libnum_cpus",

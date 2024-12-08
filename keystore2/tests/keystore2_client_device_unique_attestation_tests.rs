@@ -11,23 +11,18 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode,
-    KeyPurpose::KeyPurpose, PaddingMode::PaddingMode, SecurityLevel::SecurityLevel, Tag::Tag,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
-use keystore2_test_utils::ffi_test_utils::get_value_from_attest_record;
 
 use crate::keystore2_client_test_utils::{
     delete_app_key, get_attest_id_value, is_second_imei_id_attestation_required,
-    perform_sample_asym_sign_verify_op,
+    perform_sample_asym_sign_verify_op, skip_device_unique_attestation_tests,
 };
-
-use crate::skip_tests_if_keymaster_impl_present;
+use crate::require_keymint;
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode,
+    KeyPurpose::KeyPurpose, PaddingMode::PaddingMode, Tag::Tag,
+};
+use keystore2_test_utils::ffi_test_utils::get_value_from_attest_record;
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
 
 /// This macro is used for generating device unique attested EC key with device id attestation.
 macro_rules! test_ec_key_device_unique_attestation_id {
@@ -50,6 +45,9 @@ macro_rules! test_rsa_key_device_unique_attestation_id {
 }
 
 fn generate_ec_key_device_unique_attested_with_id_attest(attest_id_tag: Tag, prop_name: &str) {
+    if skip_device_unique_attestation_tests() {
+        return;
+    }
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::EC)
@@ -67,6 +65,9 @@ fn generate_ec_key_device_unique_attested_with_id_attest(attest_id_tag: Tag, pro
 }
 
 fn generate_rsa_key_device_unique_attested_with_id_attest(attest_id_tag: Tag, prop_name: &str) {
+    if skip_device_unique_attestation_tests() {
+        return;
+    }
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::RSA)
@@ -113,17 +114,10 @@ fn generate_device_unique_attested_key_with_device_attest_ids(
     attest_id: Tag,
     prop_name: &str,
 ) {
-    let keystore2 = get_keystore_service();
-    let result =
-        key_generations::map_ks_error(keystore2.getSecurityLevel(SecurityLevel::STRONGBOX));
-    if result.is_err() {
-        assert_eq!(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE), result.unwrap_err());
-        return;
-    }
-    let sec_level = result.unwrap();
+    let Some(sl) = SecLevel::strongbox() else { return };
 
     if attest_id == Tag::ATTESTATION_ID_SECOND_IMEI
-        && !is_second_imei_id_attestation_required(&keystore2)
+        && !is_second_imei_id_attestation_required(&sl.keystore2)
     {
         return;
     }
@@ -134,12 +128,9 @@ fn generate_device_unique_attested_key_with_device_attest_ids(
         }
         let gen_params = add_attest_id_auth(gen_params, attest_id, value.clone());
         let alias = "ks_test_device_unique_attest_id_test";
-        match key_generations::map_ks_error(key_generations::generate_key(
-            &sec_level,
-            &gen_params,
-            alias,
-        )) {
-            Ok(key_metadata) => {
+        match key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias))
+        {
+            Ok(Some(key_metadata)) => {
                 let attest_id_value = get_value_from_attest_record(
                     key_metadata.certificate.as_ref().unwrap(),
                     attest_id,
@@ -147,8 +138,9 @@ fn generate_device_unique_attested_key_with_device_attest_ids(
                 )
                 .expect("Attest id verification failed.");
                 assert_eq!(attest_id_value, value);
-                delete_app_key(&keystore2, alias).unwrap();
+                delete_app_key(&sl.keystore2, alias).unwrap();
             }
+            Ok(None) => {}
             Err(e) => {
                 assert_eq!(e, Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
             }
@@ -160,9 +152,8 @@ fn generate_device_unique_attested_key_with_device_attest_ids(
 /// Test should fail to generate a key with error code `INVALID_ARGUMENT`
 #[test]
 fn keystore2_gen_key_device_unique_attest_with_default_sec_level_unimplemented() {
-    skip_tests_if_keymaster_impl_present!();
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
+    require_keymint!(sl);
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
@@ -175,11 +166,8 @@ fn keystore2_gen_key_device_unique_attest_with_default_sec_level_unimplemented()
         .device_unique_attestation();
 
     let alias = "ks_test_auth_tags_test";
-    let result = key_generations::map_ks_error(key_generations::generate_key(
-        &sec_level,
-        &gen_params,
-        alias,
-    ));
+    let result =
+        key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias));
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -192,15 +180,11 @@ fn keystore2_gen_key_device_unique_attest_with_default_sec_level_unimplemented()
 /// use it for performing an operation.
 #[test]
 fn keystore2_gen_ec_key_device_unique_attest_with_strongbox_sec_level_test_success() {
-    let keystore2 = get_keystore_service();
-    let result =
-        key_generations::map_ks_error(keystore2.getSecurityLevel(SecurityLevel::STRONGBOX));
-    if result.is_err() {
-        assert_eq!(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE), result.unwrap_err());
+    let Some(sl) = SecLevel::strongbox() else { return };
+    if skip_device_unique_attestation_tests() {
         return;
     }
 
-    let sec_level = result.unwrap();
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::EC)
@@ -212,20 +196,17 @@ fn keystore2_gen_ec_key_device_unique_attest_with_strongbox_sec_level_test_succe
         .device_unique_attestation();
 
     let alias = "ks_device_unique_ec_key_attest_test";
-    match key_generations::map_ks_error(key_generations::generate_key(
-        &sec_level,
-        &gen_params,
-        alias,
-    )) {
-        Ok(key_metadata) => {
+    match key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias)) {
+        Ok(Some(key_metadata)) => {
             perform_sample_asym_sign_verify_op(
-                &sec_level,
+                &sl.binder,
                 &key_metadata,
                 None,
                 Some(Digest::SHA_2_256),
             );
-            delete_app_key(&keystore2, alias).unwrap();
+            delete_app_key(&sl.keystore2, alias).unwrap();
         }
+        Ok(None) => {}
         Err(e) => {
             assert_eq!(e, Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
         }
@@ -237,15 +218,11 @@ fn keystore2_gen_ec_key_device_unique_attest_with_strongbox_sec_level_test_succe
 /// use it for performing an operation.
 #[test]
 fn keystore2_gen_rsa_key_device_unique_attest_with_strongbox_sec_level_test_success() {
-    let keystore2 = get_keystore_service();
-    let result =
-        key_generations::map_ks_error(keystore2.getSecurityLevel(SecurityLevel::STRONGBOX));
-    if result.is_err() {
-        assert_eq!(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE), result.unwrap_err());
+    let Some(sl) = SecLevel::strongbox() else { return };
+    if skip_device_unique_attestation_tests() {
         return;
     }
 
-    let sec_level = result.unwrap();
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::RSA)
@@ -259,20 +236,17 @@ fn keystore2_gen_rsa_key_device_unique_attest_with_strongbox_sec_level_test_succ
         .device_unique_attestation();
 
     let alias = "ks_device_unique_rsa_key_attest_test";
-    match key_generations::map_ks_error(key_generations::generate_key(
-        &sec_level,
-        &gen_params,
-        alias,
-    )) {
-        Ok(key_metadata) => {
+    match key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias)) {
+        Ok(Some(key_metadata)) => {
             perform_sample_asym_sign_verify_op(
-                &sec_level,
+                &sl.binder,
                 &key_metadata,
                 Some(PaddingMode::RSA_PKCS1_1_5_SIGN),
                 Some(Digest::SHA_2_256),
             );
-            delete_app_key(&keystore2, alias).unwrap();
+            delete_app_key(&sl.keystore2, alias).unwrap();
         }
+        Ok(None) => {}
         Err(e) => {
             assert_eq!(e, Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
         }
@@ -283,15 +257,11 @@ fn keystore2_gen_rsa_key_device_unique_attest_with_strongbox_sec_level_test_succ
 /// Test should fail with error response code `CANNOT_ATTEST_IDS`.
 #[test]
 fn keystore2_device_unique_attest_key_fails_with_invalid_attestation_id() {
-    let keystore2 = get_keystore_service();
-    let result =
-        key_generations::map_ks_error(keystore2.getSecurityLevel(SecurityLevel::STRONGBOX));
-    if result.is_err() {
-        assert_eq!(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE), result.unwrap_err());
+    let Some(sl) = SecLevel::strongbox() else { return };
+    if skip_device_unique_attestation_tests() {
         return;
     }
 
-    let sec_level = result.unwrap();
     let attest_id_params = vec![
         (Tag::ATTESTATION_ID_BRAND, b"invalid-brand".to_vec()),
         (Tag::ATTESTATION_ID_DEVICE, b"invalid-device-name".to_vec()),
@@ -315,13 +285,10 @@ fn keystore2_device_unique_attest_key_fails_with_invalid_attestation_id() {
         let alias = "ks_ec_device_unique_attested_test_key_fail";
         let gen_params = add_attest_id_auth(gen_params, attest_id, value.clone());
 
-        let result = key_generations::map_ks_error(key_generations::generate_key(
-            &sec_level,
-            &gen_params,
-            alias,
-        ));
+        let result =
+            key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Km(ErrorCode::CANNOT_ATTEST_IDS)));
+        assert_eq!(result.unwrap_err(), Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
     }
 }
 

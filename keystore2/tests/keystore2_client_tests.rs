@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO: rename modules to strip text repeated from crate name ("keystore2_client_" and "_tests").
 pub mod keystore2_client_3des_key_tests;
 pub mod keystore2_client_aes_key_tests;
 pub mod keystore2_client_attest_key_tests;
@@ -30,3 +31,5 @@ pub mod keystore2_client_operation_tests;
 pub mod keystore2_client_rsa_key_tests;
 pub mod keystore2_client_test_utils;
 pub mod keystore2_client_update_subcomponent_tests;
+
+pub mod user_auth;

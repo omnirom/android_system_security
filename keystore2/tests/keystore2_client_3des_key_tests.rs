@@ -12,26 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Algorithm::Algorithm, BlockMode::BlockMode, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
-    PaddingMode::PaddingMode, SecurityLevel::SecurityLevel,
-};
-
-use android_system_keystore2::aidl::android::system::keystore2::{
-    Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error,
-};
-
 use crate::keystore2_client_test_utils::{
     perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
 };
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Algorithm::Algorithm, BlockMode::BlockMode, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
+    PaddingMode::PaddingMode,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    Domain::Domain, KeyDescriptor::KeyDescriptor,
+};
+use keystore2_test_utils::{authorizations, key_generations, key_generations::Error, SecLevel};
 
 /// Generate a 3DES key. Create encryption and decryption operations using the generated key.
 fn create_3des_key_and_operation(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     padding_mode: PaddingMode,
     block_mode: BlockMode,
     nonce: &mut Option<Vec<u8>>,
@@ -39,7 +34,7 @@ fn create_3des_key_and_operation(
     let alias = format!("ks_3des_test_key_{}{}", block_mode.0, padding_mode.0);
 
     let key_metadata = key_generations::generate_sym_key(
-        sec_level,
+        sl,
         Algorithm::TRIPLE_DES,
         168,
         &alias,
@@ -50,7 +45,7 @@ fn create_3des_key_and_operation(
 
     // Encrypts `SAMPLE_PLAIN_TEXT` whose length is multiple of DES block size.
     let cipher_text = perform_sample_sym_key_encrypt_op(
-        sec_level,
+        &sl.binder,
         padding_mode,
         block_mode,
         nonce,
@@ -60,7 +55,7 @@ fn create_3des_key_and_operation(
     assert!(cipher_text.is_some());
 
     let plain_text = perform_sample_sym_key_decrypt_op(
-        sec_level,
+        &sl.binder,
         &cipher_text.unwrap(),
         padding_mode,
         block_mode,
@@ -77,19 +72,19 @@ fn create_3des_key_and_operation(
 /// Generate 3DES keys with various block modes and paddings.
 ///  - Block Modes: ECB, CBC
 ///  - Padding Modes: NONE, PKCS7
+///
 /// Test should generate keys and perform operation successfully.
 #[test]
 fn keystore2_3des_ecb_cbc_generate_key_success() {
-    let keystore2 = get_keystore_service();
     let block_modes = [BlockMode::ECB, BlockMode::CBC];
     let padding_modes = [PaddingMode::PKCS7, PaddingMode::NONE];
 
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     for block_mode in block_modes {
         for padding_mode in padding_modes {
             assert_eq!(
                 Ok(()),
-                create_3des_key_and_operation(&sec_level, padding_mode, block_mode, &mut None)
+                create_3des_key_and_operation(&sl, padding_mode, block_mode, &mut None)
             );
         }
     }
@@ -99,13 +94,12 @@ fn keystore2_3des_ecb_cbc_generate_key_success() {
 /// an error code `UNSUPPORTED_KEY_SIZE`.
 #[test]
 fn keystore2_3des_key_fails_unsupported_key_size() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "3des_key_test_invalid_1";
     let invalid_key_size = 128;
 
     let result = key_generations::map_ks_error(key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::TRIPLE_DES,
         invalid_key_size,
         alias,
@@ -122,8 +116,7 @@ fn keystore2_3des_key_fails_unsupported_key_size() {
 /// `UNSUPPORTED_PADDING_MODE`.
 #[test]
 fn keystore2_3des_key_fails_missing_padding() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "3des_key_test_missing_padding";
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -134,7 +127,8 @@ fn keystore2_3des_key_fails_missing_padding() {
         .key_size(168)
         .block_mode(BlockMode::ECB);
 
-    let key_metadata = sec_level
+    let key_metadata = sl
+        .binder
         .generateKey(
             &KeyDescriptor {
                 domain: Domain::APP,
@@ -153,7 +147,7 @@ fn keystore2_3des_key_fails_missing_padding() {
         .purpose(KeyPurpose::ENCRYPT)
         .block_mode(BlockMode::ECB);
 
-    let result = key_generations::map_ks_error(sec_level.createOperation(
+    let result = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &op_params,
         false,
@@ -166,12 +160,11 @@ fn keystore2_3des_key_fails_missing_padding() {
 /// multiple of the DES block size.
 #[test]
 fn keystore2_3des_key_encrypt_fails_invalid_input_length() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = "3des_key_test_invalid_input_len";
 
     let key_metadata = key_generations::generate_sym_key(
-        &sec_level,
+        &sl,
         Algorithm::TRIPLE_DES,
         168,
         alias,
@@ -186,7 +179,8 @@ fn keystore2_3des_key_encrypt_fails_invalid_input_length() {
         .padding_mode(PaddingMode::NONE)
         .block_mode(BlockMode::ECB);
 
-    let op_response = sec_level
+    let op_response = sl
+        .binder
         .createOperation(&key_metadata.key, &op_params, false)
         .expect("Error in creation of operation using rebound key.");
     assert!(op_response.iOperation.is_some());
@@ -204,11 +198,10 @@ fn keystore2_3des_key_encrypt_fails_invalid_input_length() {
 /// error code `UNSUPPORTED_BLOCK_MODE`.
 #[test]
 fn keystore2_3des_key_fails_unsupported_block_mode() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let result = key_generations::map_ks_error(create_3des_key_and_operation(
-        &sec_level,
+        &sl,
         PaddingMode::NONE,
         BlockMode::CTR,
         &mut None,

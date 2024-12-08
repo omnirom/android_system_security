@@ -18,7 +18,6 @@
 //! by init.
 
 mod conditioner;
-mod cutils_socket;
 mod drbg;
 
 use std::{
@@ -70,6 +69,9 @@ fn get_socket(path: &Path) -> Result<UnixListener> {
 }
 
 fn setup() -> Result<(ConditionerBuilder, UnixListener)> {
+    // SAFETY: nobody has taken ownership of the inherited FDs yet.
+    unsafe { rustutils::inherited_fd::init_once() }
+        .context("In setup, failed to own inherited FDs")?;
     configure_logging()?;
     let cli = Cli::try_parse()?;
     // SAFETY: Nothing else sets the signal handler, so either it was set here or it is the default.
@@ -78,8 +80,9 @@ fn setup() -> Result<(ConditionerBuilder, UnixListener)> {
 
     let listener = match cli.socket {
         Some(path) => get_socket(path.as_path())?,
-        None => cutils_socket::android_get_control_socket("prng_seeder")
-            .context("In setup, calling android_get_control_socket")?,
+        None => rustutils::sockets::android_get_control_socket("prng_seeder")
+            .context("In setup, calling android_get_control_socket")?
+            .into(),
     };
     let hwrng = std::fs::File::open(&cli.source)
         .with_context(|| format!("Unable to open hwrng {}", cli.source.display()))?;

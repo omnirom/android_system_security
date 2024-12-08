@@ -19,7 +19,13 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{env::temp_dir, ops::Deref};
 
-use android_system_keystore2::aidl::android::system::keystore2::IKeystoreService::IKeystoreService;
+use android_system_keystore2::aidl::android::system::keystore2::{
+    IKeystoreService::IKeystoreService,
+    IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+};
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
+};
 use android_security_authorization::aidl::android::security::authorization::IKeystoreAuthorization::IKeystoreAuthorization;
 
 pub mod authorizations;
@@ -122,4 +128,69 @@ pub fn get_keystore_service() -> binder::Strong<dyn IKeystoreService> {
 /// Get Keystore auth service.
 pub fn get_keystore_auth_service() -> binder::Strong<dyn IKeystoreAuthorization> {
     binder::get_interface(AUTH_SERVICE_NAME).unwrap()
+}
+
+/// Security level-specific data.
+pub struct SecLevel {
+    /// Binder connection for the top-level service.
+    pub keystore2: binder::Strong<dyn IKeystoreService>,
+    /// Binder connection for the security level.
+    pub binder: binder::Strong<dyn IKeystoreSecurityLevel>,
+    /// Security level.
+    pub level: SecurityLevel,
+}
+
+impl SecLevel {
+    /// Return security level data for TEE.
+    pub fn tee() -> Self {
+        let level = SecurityLevel::TRUSTED_ENVIRONMENT;
+        let keystore2 = get_keystore_service();
+        let binder =
+            keystore2.getSecurityLevel(level).expect("TEE security level should always be present");
+        Self { keystore2, binder, level }
+    }
+    /// Return security level data for StrongBox, if present.
+    pub fn strongbox() -> Option<Self> {
+        let level = SecurityLevel::STRONGBOX;
+        let keystore2 = get_keystore_service();
+        match key_generations::map_ks_error(keystore2.getSecurityLevel(level)) {
+            Ok(binder) => Some(Self { keystore2, binder, level }),
+            Err(e) => {
+                assert_eq!(e, key_generations::Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE));
+                None
+            }
+        }
+    }
+    /// Indicate whether this security level is a KeyMint implementation (not Keymaster).
+    pub fn is_keymint(&self) -> bool {
+        let instance = match self.level {
+            SecurityLevel::TRUSTED_ENVIRONMENT => "default",
+            SecurityLevel::STRONGBOX => "strongbox",
+            l => panic!("unexpected level {l:?}"),
+        };
+        let name = format!("android.hardware.security.keymint.IKeyMintDevice/{instance}");
+        binder::is_declared(&name).expect("Could not check for declared keymint interface")
+    }
+
+    /// Indicate whether this security level is a Keymaster implementation (not KeyMint).
+    pub fn is_keymaster(&self) -> bool {
+        !self.is_keymint()
+    }
+
+    /// Get KeyMint version.
+    /// Returns 0 if the underlying device is Keymaster not KeyMint.
+    pub fn get_keymint_version(&self) -> i32 {
+        let instance = match self.level {
+            SecurityLevel::TRUSTED_ENVIRONMENT => "default",
+            SecurityLevel::STRONGBOX => "strongbox",
+            l => panic!("unexpected level {l:?}"),
+        };
+        let name = format!("android.hardware.security.keymint.IKeyMintDevice/{instance}");
+        if binder::is_declared(&name).expect("Could not check for declared keymint interface") {
+            let km: binder::Strong<dyn IKeyMintDevice> = binder::get_interface(&name).unwrap();
+            km.getInterfaceVersion().unwrap()
+        } else {
+            0
+        }
+    }
 }

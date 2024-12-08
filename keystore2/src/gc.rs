@@ -21,7 +21,7 @@
 use crate::ks_err;
 use crate::{
     async_task,
-    database::{BlobMetaData, KeystoreDB, Uuid},
+    database::{KeystoreDB, SupersededBlob, Uuid},
     super_key::SuperKeyManager,
 };
 use anyhow::{Context, Result};
@@ -84,7 +84,7 @@ impl Gc {
 
 struct GcInternal {
     deleted_blob_ids: Vec<i64>,
-    superseded_blobs: Vec<(i64, Vec<u8>, BlobMetaData)>,
+    superseded_blobs: Vec<SupersededBlob>,
     invalidate_key: Box<dyn Fn(&Uuid, &[u8]) -> Result<()> + Send + 'static>,
     db: KeystoreDB,
     async_task: std::sync::Weak<AsyncTask>,
@@ -109,7 +109,7 @@ impl GcInternal {
             self.superseded_blobs = blobs;
         }
 
-        if let Some((blob_id, blob, blob_metadata)) = self.superseded_blobs.pop() {
+        if let Some(SupersededBlob { blob_id, blob, metadata }) = self.superseded_blobs.pop() {
             // Add the next blob_id to the deleted blob ids list. So it will be
             // removed from the database regardless of whether the following
             // succeeds or not.
@@ -119,12 +119,12 @@ impl GcInternal {
             // and delete the key, unwrapping if necessary and possible.
             // (At this time keys may get deleted without having the super encryption
             // key in this case we can only delete the key from the database.)
-            if let Some(uuid) = blob_metadata.km_uuid() {
+            if let Some(uuid) = metadata.km_uuid() {
                 let blob = self
                     .super_key
                     .read()
                     .unwrap()
-                    .unwrap_key_if_required(&blob_metadata, &blob)
+                    .unwrap_key_if_required(&metadata, &blob)
                     .context(ks_err!("Trying to unwrap to-be-deleted blob.",))?;
                 (self.invalidate_key)(uuid, &blob).context(ks_err!("Trying to invalidate key."))?;
             }

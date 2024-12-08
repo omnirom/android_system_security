@@ -34,8 +34,8 @@ fn key_owner(domain: Domain, nspace: i64, uid: i32) -> i32 {
     match domain {
         Domain::APP => uid,
         Domain::SELINUX => (nspace | FLAG_NAMESPACE) as i32,
-        _ => {
-            log::info!("Not logging audit event for key with unexpected domain");
+        d => {
+            log::info!("Not logging audit event for key with domain {d:?}");
             0
         }
     }

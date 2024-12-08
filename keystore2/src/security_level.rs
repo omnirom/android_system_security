@@ -34,7 +34,8 @@ use crate::super_key::{KeyBlob, SuperKeyManager};
 use crate::utils::{
     check_device_attestation_permissions, check_key_permission,
     check_unique_id_attestation_permissions, is_device_id_attestation_tag,
-    key_characteristics_to_internal, uid_to_android_user, watchdog as wd, UNDEFINED_NOT_AFTER,
+    key_characteristics_to_internal, log_security_safe_params, uid_to_android_user, watchdog as wd,
+    UNDEFINED_NOT_AFTER,
 };
 use crate::{
     database::{
@@ -109,14 +110,12 @@ impl KeystoreSecurityLevel {
 
     fn watch_millis(&self, id: &'static str, millis: u64) -> Option<wd::WatchPoint> {
         let sec_level = self.security_level;
-        wd::watch_millis_with(id, millis, move || format!("SecurityLevel {:?}", sec_level))
+        wd::watch_millis_with(id, millis, sec_level)
     }
 
     fn watch(&self, id: &'static str) -> Option<wd::WatchPoint> {
         let sec_level = self.security_level;
-        wd::watch_millis_with(id, wd::DEFAULT_TIMEOUT_MS, move || {
-            format!("SecurityLevel {:?}", sec_level)
-        })
+        wd::watch_millis_with(id, wd::DEFAULT_TIMEOUT_MS, sec_level)
     }
 
     fn store_new_key(
@@ -330,8 +329,9 @@ impl KeystoreSecurityLevel {
                 operation_parameters,
                 |blob| loop {
                     match map_km_error({
-                        let _wp =
-                            self.watch("In KeystoreSecurityLevel::create_operation: calling begin");
+                        let _wp = self.watch(
+                            "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
+                        );
                         self.keymint.begin(
                             purpose,
                             blob,
@@ -444,17 +444,23 @@ impl KeystoreSecurityLevel {
 
         // If there is an attestation challenge we need to get an application id.
         if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
-            let aaid = {
-                let _wp = self
-                    .watch("In KeystoreSecurityLevel::add_required_parameters calling: get_aaid");
-                keystore2_aaid::get_aaid(uid)
-                    .map_err(|e| anyhow!(ks_err!("get_aaid returned status {}.", e)))
-            }?;
-
-            result.push(KeyParameter {
-                tag: Tag::ATTESTATION_APPLICATION_ID,
-                value: KeyParameterValue::Blob(aaid),
-            });
+            let _wp =
+                self.watch(" KeystoreSecurityLevel::add_required_parameters: calling get_aaid");
+            match keystore2_aaid::get_aaid(uid) {
+                Ok(aaid_ok) => {
+                    result.push(KeyParameter {
+                        tag: Tag::ATTESTATION_APPLICATION_ID,
+                        value: KeyParameterValue::Blob(aaid_ok),
+                    });
+                }
+                Err(e) if e == ResponseCode::GET_ATTESTATION_APPLICATION_ID_FAILED.0 as u32 => {
+                    return Err(Error::Rc(ResponseCode::GET_ATTESTATION_APPLICATION_ID_FAILED))
+                        .context(ks_err!("Attestation ID retrieval failed."));
+                }
+                Err(e) => {
+                    return Err(anyhow!(e)).context(ks_err!("Attestation ID retrieval error."))
+                }
+            }
         }
 
         if params.iter().any(|kp| kp.tag == Tag::INCLUDE_UNIQUE_ID) {
@@ -576,8 +582,8 @@ impl KeystoreSecurityLevel {
                         map_km_error({
                             let _wp = self.watch_millis(
                                 concat!(
-                                    "In KeystoreSecurityLevel::generate_key (UserGenerated): ",
-                                    "calling generate_key."
+                                    "KeystoreSecurityLevel::generate_key (UserGenerated): ",
+                                    "calling IKeyMintDevice::generate_key"
                                 ),
                                 5000, // Generate can take a little longer.
                             );
@@ -585,15 +591,19 @@ impl KeystoreSecurityLevel {
                         })
                     },
                 )
-                .context(ks_err!("Using user generated attestation key."))
+                .context(ks_err!(
+                    "While generating with a user-generated \
+                      attestation key, params: {:?}.",
+                    log_security_safe_params(&params)
+                ))
                 .map(|(result, _)| result),
             Some(AttestationKeyInfo::RkpdProvisioned { attestation_key, attestation_certs }) => {
                 self.upgrade_rkpd_keyblob_if_required_with(&attestation_key.keyBlob, &[], |blob| {
                     map_km_error({
                         let _wp = self.watch_millis(
                             concat!(
-                                "In KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
-                                "calling generate_key.",
+                                "KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
+                                "calling IKeyMintDevice::generate_key",
                             ),
                             5000, // Generate can take a little longer.
                         );
@@ -605,7 +615,12 @@ impl KeystoreSecurityLevel {
                         self.keymint.generateKey(&params, dynamic_attest_key.as_ref())
                     })
                 })
-                .context(ks_err!("While generating Key with remote provisioned attestation key."))
+                .context(ks_err!(
+                    "While generating Key {:?} with remote \
+                    provisioned attestation key and params: {:?}.",
+                    key.alias,
+                    log_security_safe_params(&params)
+                ))
                 .map(|(mut result, _)| {
                     result.certificateChain.push(attestation_certs);
                     result
@@ -614,14 +629,18 @@ impl KeystoreSecurityLevel {
             None => map_km_error({
                 let _wp = self.watch_millis(
                     concat!(
-                        "In KeystoreSecurityLevel::generate_key (No attestation): ",
-                        "calling generate_key.",
+                        "KeystoreSecurityLevel::generate_key (No attestation key): ",
+                        "calling IKeyMintDevice::generate_key",
                     ),
                     5000, // Generate can take a little longer.
                 );
                 self.keymint.generateKey(&params, None)
             })
-            .context(ks_err!("While generating Key without explicit attestation key.")),
+            .context(ks_err!(
+                "While generating without a provided \
+                 attestation key and params: {:?}.",
+                log_security_safe_params(&params)
+            )),
         }
         .context(ks_err!())?;
 
@@ -678,7 +697,8 @@ impl KeystoreSecurityLevel {
 
         let km_dev = &self.keymint;
         let creation_result = map_km_error({
-            let _wp = self.watch("In KeystoreSecurityLevel::import_key: calling importKey.");
+            let _wp =
+                self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
             km_dev.importKey(&params, format, key_data, None /* attestKey */)
         })
         .context(ks_err!("Trying to call importKey"))?;
@@ -792,7 +812,7 @@ impl KeystoreSecurityLevel {
                 &[],
                 |wrapping_blob| {
                     let _wp = self.watch(
-                        "In KeystoreSecurityLevel::import_wrapped_key: calling importWrappedKey.",
+                        "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
                     );
                     let creation_result = map_km_error(self.keymint.importWrappedKey(
                         wrapped_data,
@@ -866,7 +886,7 @@ impl KeystoreSecurityLevel {
                 }
             },
         )
-        .context(ks_err!())?;
+        .context(ks_err!("upgrade_keyblob_if_required_with(key_id={:?})", key_id_guard))?;
 
         // If no upgrade was needed, use the opportunity to reencrypt the blob if required
         // and if the a key_id_guard is held. Note: key_id_guard can only be Some if no
@@ -906,7 +926,10 @@ impl KeystoreSecurityLevel {
                 }
             },
         )
-        .context(ks_err!())
+        .context(ks_err!(
+            "upgrade_rkpd_keyblob_if_required_with(params={:?})",
+            log_security_safe_params(params)
+        ))
     }
 
     fn convert_storage_key_to_ephemeral(
@@ -930,8 +953,8 @@ impl KeystoreSecurityLevel {
         let km_dev = &self.keymint;
         let res = {
             let _wp = self.watch(concat!(
-                "In IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
-                "calling convertStorageKeyToEphemeral (1)"
+                "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
+                "calling IKeyMintDevice::convertStorageKeyToEphemeral (1)"
             ));
             map_km_error(km_dev.convertStorageKeyToEphemeral(key_blob))
         };
@@ -941,19 +964,18 @@ impl KeystoreSecurityLevel {
             }
             Err(error::Error::Km(ErrorCode::KEY_REQUIRES_UPGRADE)) => {
                 let upgraded_blob = {
-                    let _wp = self.watch("In convert_storage_key_to_ephemeral: calling upgradeKey");
+                    let _wp = self.watch("IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: calling IKeyMintDevice::upgradeKey");
                     map_km_error(km_dev.upgradeKey(key_blob, &[]))
                 }
                 .context(ks_err!("Failed to upgrade key blob."))?;
                 let ephemeral_key = {
-                    let _wp = self.watch(
-                        "In convert_storage_key_to_ephemeral: calling convertStorageKeyToEphemeral (2)",
-                    );
+                    let _wp = self.watch(concat!(
+                        "IKeystoreSecurityLevel::convert_storage_key_to_ephemeral: ",
+                        "calling IKeyMintDevice::convertStorageKeyToEphemeral (2)"
+                    ));
                     map_km_error(km_dev.convertStorageKeyToEphemeral(&upgraded_blob))
                 }
-                    .context(ks_err!(
-                        "Failed to retrieve ephemeral key (after upgrade)."
-                    ))?;
+                .context(ks_err!("Failed to retrieve ephemeral key (after upgrade)."))?;
                 Ok(EphemeralStorageKeyResponse {
                     ephemeralKey: ephemeral_key,
                     upgradedBlob: Some(upgraded_blob),
@@ -980,7 +1002,8 @@ impl KeystoreSecurityLevel {
 
         let km_dev = &self.keymint;
         {
-            let _wp = self.watch("In KeystoreSecuritylevel::delete_key: calling deleteKey");
+            let _wp =
+                self.watch("KeystoreSecuritylevel::delete_key: calling IKeyMintDevice::deleteKey");
             map_km_error(km_dev.deleteKey(key_blob)).context(ks_err!("keymint device deleteKey"))
         }
     }

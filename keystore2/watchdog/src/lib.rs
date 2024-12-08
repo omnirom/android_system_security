@@ -29,6 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Represents a Watchdog record. It can be created with `Watchdog::watch` or
 /// `Watchdog::watch_with`. It disarms the record when dropped.
 pub struct WatchPoint {
@@ -58,59 +61,73 @@ struct Index {
 struct Record {
     started: Instant,
     deadline: Instant,
-    callback: Option<Box<dyn Fn() -> String + Send + 'static>>,
+    context: Option<Box<dyn std::fmt::Debug + Send + 'static>>,
 }
 
 struct WatchdogState {
     state: State,
     thread: Option<thread::JoinHandle<()>>,
-    timeout: Duration,
+    /// How long to wait before dropping the watchdog thread when idle.
+    idle_timeout: Duration,
     records: HashMap<Index, Record>,
-    last_report: Instant,
-    has_overdue: bool,
+    last_report: Option<Instant>,
+    noisy_timeout: Duration,
 }
 
 impl WatchdogState {
-    fn update_overdue_and_find_next_timeout(&mut self) -> (bool, Option<Duration>) {
+    /// If we have overdue records, we want to log them but slowly backoff
+    /// so that we do not clog the logs. We start with logs every
+    /// `MIN_REPORT_TIMEOUT` sec then increment the timeout by 5 up
+    /// to a maximum of `MAX_REPORT_TIMEOUT`.
+    const MIN_REPORT_TIMEOUT: Duration = Duration::from_secs(1);
+    const MAX_REPORT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn reset_noisy_timeout(&mut self) {
+        self.noisy_timeout = Self::MIN_REPORT_TIMEOUT;
+    }
+
+    fn update_noisy_timeout(&mut self) {
+        let noisy_update = self.noisy_timeout + Duration::from_secs(5);
+        self.noisy_timeout = min(Self::MAX_REPORT_TIMEOUT, noisy_update);
+    }
+
+    fn overdue_and_next_timeout(&self) -> (bool, Option<Duration>) {
         let now = Instant::now();
         let mut next_timeout: Option<Duration> = None;
         let mut has_overdue = false;
         for (_, r) in self.records.iter() {
             let timeout = r.deadline.saturating_duration_since(now);
             if timeout == Duration::new(0, 0) {
+                // This timeout has passed.
                 has_overdue = true;
-                continue;
+            } else {
+                // This timeout is still to come; see if it's the closest one to now.
+                next_timeout = match next_timeout {
+                    Some(nt) if timeout < nt => Some(timeout),
+                    Some(nt) => Some(nt),
+                    None => Some(timeout),
+                };
             }
-            next_timeout = match next_timeout {
-                Some(nt) => {
-                    if timeout < nt {
-                        Some(timeout)
-                    } else {
-                        Some(nt)
-                    }
-                }
-                None => Some(timeout),
-            };
         }
         (has_overdue, next_timeout)
     }
 
-    fn log_report(&mut self, has_overdue: bool) -> bool {
-        match (self.has_overdue, has_overdue) {
-            (true, true) => {
-                if self.last_report.elapsed() < Watchdog::NOISY_REPORT_TIMEOUT {
-                    self.has_overdue = false;
-                    return false;
-                }
-            }
-            (_, false) => {
-                self.has_overdue = false;
-                return false;
-            }
-            (false, true) => {}
+    fn log_report(&mut self, has_overdue: bool) {
+        if !has_overdue {
+            // Nothing to report.
+            self.last_report = None;
+            return;
         }
-        self.last_report = Instant::now();
-        self.has_overdue = has_overdue;
+        // Something to report...
+        if let Some(reported_at) = self.last_report {
+            if reported_at.elapsed() < self.noisy_timeout {
+                // .. but it's too soon since the last report.
+                self.last_report = None;
+                return;
+            }
+        }
+        self.update_noisy_timeout();
+        self.last_report = Some(Instant::now());
         log::warn!("### Keystore Watchdog report - BEGIN ###");
 
         let now = Instant::now();
@@ -149,15 +166,15 @@ impl WatchdogState {
 
         for g in groups.iter() {
             for (i, r) in g.iter() {
-                match &r.callback {
-                    Some(cb) => {
+                match &r.context {
+                    Some(ctx) => {
                         log::warn!(
-                            "{:?} {} Pending: {:?} Overdue {:?}: {}",
+                            "{:?} {} Pending: {:?} Overdue {:?} for {:?}",
                             i.tid,
                             i.id,
                             r.started.elapsed(),
                             r.deadline.elapsed(),
-                            (cb)()
+                            ctx
                         );
                     }
                     None => {
@@ -173,11 +190,33 @@ impl WatchdogState {
             }
         }
         log::warn!("### Keystore Watchdog report - END ###");
-        true
     }
 
     fn disarm(&mut self, index: Index) {
-        self.records.remove(&index);
+        let result = self.records.remove(&index);
+        if let Some(record) = result {
+            let now = Instant::now();
+            let timeout_left = record.deadline.saturating_duration_since(now);
+            if timeout_left == Duration::new(0, 0) {
+                match &record.context {
+                    Some(ctx) => log::info!(
+                        "Watchdog complete for: {:?} {} Pending: {:?} Overdue {:?} for {:?}",
+                        index.tid,
+                        index.id,
+                        record.started.elapsed(),
+                        record.deadline.elapsed(),
+                        ctx
+                    ),
+                    None => log::info!(
+                        "Watchdog complete for: {:?} {} Pending: {:?} Overdue {:?}",
+                        index.tid,
+                        index.id,
+                        record.started.elapsed(),
+                        record.deadline.elapsed()
+                    ),
+                }
+            }
+        }
     }
 
     fn arm(&mut self, index: Index, record: Record) {
@@ -195,71 +234,66 @@ pub struct Watchdog {
 }
 
 impl Watchdog {
-    /// If we have overdue records, we want to be noisy about it and log a report
-    /// at least every `NOISY_REPORT_TIMEOUT` interval.
-    const NOISY_REPORT_TIMEOUT: Duration = Duration::from_secs(1);
-
-    /// Construct a [`Watchdog`]. When `timeout` has elapsed since the watchdog thread became
+    /// Construct a [`Watchdog`]. When `idle_timeout` has elapsed since the watchdog thread became
     /// idle, i.e., there are no more active or overdue watch points, the watchdog thread
     /// terminates.
-    pub fn new(timeout: Duration) -> Arc<Self> {
+    pub fn new(idle_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
             state: Arc::new((
                 Condvar::new(),
                 Mutex::new(WatchdogState {
                     state: State::NotRunning,
                     thread: None,
-                    timeout,
+                    idle_timeout,
                     records: HashMap::new(),
-                    last_report: Instant::now(),
-                    has_overdue: false,
+                    last_report: None,
+                    noisy_timeout: WatchdogState::MIN_REPORT_TIMEOUT,
                 }),
             )),
         })
     }
 
     fn watch_with_optional(
-        wd: &Arc<Self>,
-        callback: Option<Box<dyn Fn() -> String + Send + 'static>>,
+        wd: Arc<Self>,
+        context: Option<Box<dyn std::fmt::Debug + Send + 'static>>,
         id: &'static str,
         timeout: Duration,
     ) -> Option<WatchPoint> {
-        let deadline = Instant::now().checked_add(timeout);
-        if deadline.is_none() {
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
             log::warn!("Deadline computation failed for WatchPoint \"{}\"", id);
             log::warn!("WatchPoint not armed.");
             return None;
-        }
-        wd.arm(callback, id, deadline.unwrap());
-        Some(WatchPoint { id, wd: wd.clone(), not_send: Default::default() })
+        };
+        wd.arm(context, id, deadline);
+        Some(WatchPoint { id, wd, not_send: Default::default() })
     }
 
     /// Create a new watch point. If the WatchPoint is not dropped before the timeout
     /// expires, a report is logged at least every second, which includes the id string
-    /// and whatever string the callback returns.
+    /// and any provided context.
     pub fn watch_with(
         wd: &Arc<Self>,
         id: &'static str,
         timeout: Duration,
-        callback: impl Fn() -> String + Send + 'static,
+        context: impl std::fmt::Debug + Send + 'static,
     ) -> Option<WatchPoint> {
-        Self::watch_with_optional(wd, Some(Box::new(callback)), id, timeout)
+        Self::watch_with_optional(wd.clone(), Some(Box::new(context)), id, timeout)
     }
 
-    /// Like `watch_with`, but without a callback.
+    /// Like `watch_with`, but without context.
     pub fn watch(wd: &Arc<Self>, id: &'static str, timeout: Duration) -> Option<WatchPoint> {
-        Self::watch_with_optional(wd, None, id, timeout)
+        Self::watch_with_optional(wd.clone(), None, id, timeout)
     }
 
     fn arm(
         &self,
-        callback: Option<Box<dyn Fn() -> String + Send + 'static>>,
+        context: Option<Box<dyn std::fmt::Debug + Send + 'static>>,
         id: &'static str,
         deadline: Instant,
     ) {
         let tid = thread::current().id();
         let index = Index { tid, id };
-        let record = Record { started: Instant::now(), deadline, callback };
+        let record = Record { started: Instant::now(), deadline, context };
 
         let (ref condvar, ref state) = *self.state;
 
@@ -297,21 +331,24 @@ impl Watchdog {
             let mut state = state.lock().unwrap();
 
             loop {
-                let (has_overdue, next_timeout) = state.update_overdue_and_find_next_timeout();
+                let (has_overdue, next_timeout) = state.overdue_and_next_timeout();
                 state.log_report(has_overdue);
+
                 let (next_timeout, idle) = match (has_overdue, next_timeout) {
-                    (true, Some(next_timeout)) => {
-                        (min(next_timeout, Self::NOISY_REPORT_TIMEOUT), false)
-                    }
+                    (true, Some(next_timeout)) => (min(next_timeout, state.noisy_timeout), false),
+                    (true, None) => (state.noisy_timeout, false),
                     (false, Some(next_timeout)) => (next_timeout, false),
-                    (true, None) => (Self::NOISY_REPORT_TIMEOUT, false),
-                    (false, None) => (state.timeout, true),
+                    (false, None) => (state.idle_timeout, true),
                 };
 
+                // Wait until the closest timeout pops, but use a condition variable so that if a
+                // new watchpoint is started in the meanwhile it will interrupt the wait so we can
+                // recalculate.
                 let (s, timeout) = condvar.wait_timeout(state, next_timeout).unwrap();
                 state = s;
 
                 if idle && timeout.timed_out() && state.records.is_empty() {
+                    state.reset_noisy_timeout();
                     state.state = State::NotRunning;
                     break;
                 }
@@ -319,42 +356,5 @@ impl Watchdog {
             log::info!("Watchdog thread idle -> terminating. Have a great day.");
         }));
         state.state = State::Running;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use std::sync::atomic;
-    use std::thread;
-    use std::time::Duration;
-
-    #[test]
-    fn test_watchdog() {
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_tag("keystore2_watchdog_tests")
-                .with_max_level(log::LevelFilter::Debug),
-        );
-
-        let wd = Watchdog::new(Watchdog::NOISY_REPORT_TIMEOUT.checked_mul(3).unwrap());
-        let hit_count = Arc::new(atomic::AtomicU8::new(0));
-        let hit_count_clone = hit_count.clone();
-        let wp =
-            Watchdog::watch_with(&wd, "test_watchdog", Duration::from_millis(100), move || {
-                format!("hit_count: {}", hit_count_clone.fetch_add(1, atomic::Ordering::Relaxed))
-            });
-        assert_eq!(0, hit_count.load(atomic::Ordering::Relaxed));
-        thread::sleep(Duration::from_millis(500));
-        assert_eq!(1, hit_count.load(atomic::Ordering::Relaxed));
-        thread::sleep(Watchdog::NOISY_REPORT_TIMEOUT);
-        assert_eq!(2, hit_count.load(atomic::Ordering::Relaxed));
-        drop(wp);
-        thread::sleep(Watchdog::NOISY_REPORT_TIMEOUT.checked_mul(4).unwrap());
-        assert_eq!(2, hit_count.load(atomic::Ordering::Relaxed));
-        let (_, ref state) = *wd.state;
-        let state = state.lock().unwrap();
-        assert_eq!(state.state, State::NotRunning);
     }
 }

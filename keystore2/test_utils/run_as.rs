@@ -357,9 +357,12 @@ mod test {
         // Safety: run_as must be called from a single threaded process.
         // This device test is run as a separate single threaded process.
         unsafe {
-            run_as(selinux::getcon().unwrap().to_str().unwrap(), getuid(), getgid(), || {
-                panic!("Closure must panic.")
-            })
+            run_as::<_, ()>(
+                selinux::getcon().unwrap().to_str().unwrap(),
+                getuid(),
+                getgid(),
+                || panic!("Closure must panic."),
+            )
         };
     }
 

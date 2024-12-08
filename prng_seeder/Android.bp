@@ -19,19 +19,6 @@ package {
     default_applicable_licenses: ["system_security_license"],
 }
 
-rust_bindgen {
-    name: "libcutils_socket_bindgen",
-    crate_name: "cutils_socket_bindgen",
-    wrapper_src: "cutils_wrapper.h",
-    source_stem: "bindings",
-    bindgen_flags: [
-        "--allowlist-function=android_get_control_socket",
-    ],
-    shared_libs: [
-        "libcutils",
-    ],
-}
-
 rust_defaults {
     name: "prng_seeder_defaults",
     edition: "2021",
@@ -39,10 +26,10 @@ rust_defaults {
         "libanyhow",
         "libbssl_sys",
         "libclap",
-        "libcutils_socket_bindgen",
         "liblogger",
         "liblog_rust",
         "libnix",
+        "librustutils",
         "libtokio",
     ],
 
@@ -73,10 +60,10 @@ rust_test {
         "libanyhow",
         "libbssl_sys",
         "libclap",
-        "libcutils_socket_bindgen",
         "liblogger",
         "liblog_rust",
         "libnix",
+        "librustutils",
         "libtokio",
     ],
     test_suites: ["general-tests"],

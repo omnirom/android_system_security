@@ -12,27 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::{getuid, Gid, Uid};
-use rustutils::users::AID_USER_OFFSET;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode,
-    KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
-};
-use android_system_keystore2::aidl::android::system::keystore2::{
-    CreateOperationResponse::CreateOperationResponse, Domain::Domain,
-    IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
-    ResponseCode::ResponseCode,
-};
-
-use keystore2_test_utils::{
-    authorizations, get_keystore_service, key_generations, key_generations::Error, run_as,
-};
-
 use crate::keystore2_client_test_utils::{
     delete_app_key, execute_op_run_as_child, get_vsr_api_level, perform_sample_sign_operation,
     BarrierReached, ForcedOp, TestOutcome,
 };
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+    Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode,
+    KeyPurpose::KeyPurpose,
+};
+use android_system_keystore2::aidl::android::system::keystore2::{
+    CreateOperationResponse::CreateOperationResponse, Domain::Domain, KeyDescriptor::KeyDescriptor,
+    ResponseCode::ResponseCode,
+};
+use keystore2_test_utils::{
+    authorizations, get_keystore_service, key_generations, key_generations::Error, run_as, SecLevel,
+};
+use nix::unistd::{getuid, Gid, Uid};
+use rustutils::users::AID_USER_OFFSET;
 
 macro_rules! test_ec_sign_key_op_success {
     ( $test_name:ident, $digest:expr, $ec_curve:expr ) => {
@@ -57,7 +53,7 @@ macro_rules! test_ec_sign_key_op_with_none_or_md5_digest {
 }
 
 fn create_ec_key_and_operation(
-    sec_level: &binder::Strong<dyn IKeystoreSecurityLevel>,
+    sl: &SecLevel,
     domain: Domain,
     nspace: i64,
     alias: Option<String>,
@@ -65,9 +61,9 @@ fn create_ec_key_and_operation(
     ec_curve: EcCurve,
 ) -> binder::Result<CreateOperationResponse> {
     let key_metadata =
-        key_generations::generate_ec_key(sec_level, domain, nspace, alias, ec_curve, digest)?;
+        key_generations::generate_ec_key(sl, domain, nspace, alias, ec_curve, digest)?;
 
-    sec_level.createOperation(
+    sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(digest),
         false,
@@ -75,11 +71,10 @@ fn create_ec_key_and_operation(
 }
 
 fn perform_ec_sign_key_op_success(alias: &str, digest: Digest, ec_curve: EcCurve) {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let op_response = create_ec_key_and_operation(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -96,15 +91,14 @@ fn perform_ec_sign_key_op_success(alias: &str, digest: Digest, ec_curve: EcCurve
         ))
     );
 
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 fn perform_ec_sign_key_op_with_none_or_md5_digest(alias: &str, digest: Digest, ec_curve: EcCurve) {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     match key_generations::map_ks_error(create_ec_key_and_operation(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -126,7 +120,7 @@ fn perform_ec_sign_key_op_with_none_or_md5_digest(alias: &str, digest: Digest, e
         }
     }
 
-    delete_app_key(&keystore2, alias).unwrap();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 // Below macros generate tests for generating EC keys with curves EcCurve::P_224, EcCurve::P_256,
@@ -199,12 +193,11 @@ test_ec_sign_key_op_success!(sign_ec_key_op_sha512_ec_p521, Digest::SHA_2_512, E
 /// INVALID_ARGUMENT error is expected.
 #[test]
 fn keystore2_get_key_entry_blob_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     // Generate a key with domain as BLOB.
     let key_metadata = key_generations::generate_ec_p256_signing_key(
-        &sec_level,
+        &sl,
         Domain::BLOB,
         key_generations::SELINUX_SHELL_NAMESPACE,
         None,
@@ -213,23 +206,22 @@ fn keystore2_get_key_entry_blob_fail() {
     .unwrap();
 
     // Try to load the key using above generated KeyDescriptor.
-    let result = key_generations::map_ks_error(keystore2.getKeyEntry(&key_metadata.key));
+    let result = key_generations::map_ks_error(sl.keystore2.getKeyEntry(&key_metadata.key));
     assert!(result.is_err());
     assert_eq!(Error::Rc(ResponseCode::INVALID_ARGUMENT), result.unwrap_err());
 
     // Delete the generated key blob.
-    sec_level.deleteKey(&key_metadata.key).unwrap();
+    sl.binder.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Try to generate a key with invalid Domain. `INVALID_ARGUMENT` error response is expected.
 #[test]
 fn keystore2_generate_key_invalid_domain() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_invalid_test_key_{}", getuid());
 
     let result = key_generations::map_ks_error(key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain(99), // Invalid domain.
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias),
@@ -244,8 +236,7 @@ fn keystore2_generate_key_invalid_domain() {
 /// `UNSUPPORTED_EC_CURVE or UNSUPPORTED_KEY_SIZE` error response is expected.
 #[test]
 fn keystore2_generate_ec_key_missing_curve() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_ec_no_curve_test_key_{}", getuid());
 
     // Don't provide EC curve.
@@ -256,7 +247,7 @@ fn keystore2_generate_ec_key_missing_curve() {
         .purpose(KeyPurpose::VERIFY)
         .digest(Digest::SHA_2_256);
 
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::SELINUX,
             nspace: key_generations::SELINUX_SHELL_NAMESPACE,
@@ -280,8 +271,7 @@ fn keystore2_generate_ec_key_missing_curve() {
 /// `INCOMPATIBLE_PURPOSE` error response is expected.
 #[test]
 fn keystore2_generate_ec_key_25519_multi_purpose() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
     let alias = format!("ks_ec_no_curve_test_key_{}", getuid());
 
     // Specify `SIGN and AGREE_KEY` purposes.
@@ -293,7 +283,7 @@ fn keystore2_generate_ec_key_25519_multi_purpose() {
         .purpose(KeyPurpose::AGREE_KEY)
         .digest(Digest::SHA_2_256);
 
-    let result = key_generations::map_ks_error(sec_level.generateKey(
+    let result = key_generations::map_ks_error(sl.binder.generateKey(
         &KeyDescriptor {
             domain: Domain::SELINUX,
             nspace: key_generations::SELINUX_SHELL_NAMESPACE,
@@ -314,12 +304,11 @@ fn keystore2_generate_ec_key_25519_multi_purpose() {
 /// able to create an operation successfully.
 #[test]
 fn keystore2_ec_25519_generate_key_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = format!("ks_ec_25519_none_test_key_gen_{}", getuid());
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias),
@@ -328,7 +317,8 @@ fn keystore2_ec_25519_generate_key_success() {
     )
     .unwrap();
 
-    let op_response = sec_level
+    let op_response = sl
+        .binder
         .createOperation(
             &key_metadata.key,
             &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::NONE),
@@ -350,8 +340,7 @@ fn keystore2_ec_25519_generate_key_success() {
 /// `UNSUPPORTED_DIGEST`.
 #[test]
 fn keystore2_ec_25519_generate_key_fail() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let digests = [
         Digest::MD5,
@@ -365,7 +354,7 @@ fn keystore2_ec_25519_generate_key_fail() {
     for digest in digests {
         let alias = format!("ks_ec_25519_test_key_gen_{}{}", getuid(), digest.0);
         let key_metadata = key_generations::generate_ec_key(
-            &sec_level,
+            &sl,
             Domain::APP,
             -1,
             Some(alias.to_string()),
@@ -378,7 +367,7 @@ fn keystore2_ec_25519_generate_key_fail() {
         // Digest::NONE".  However, this was not checked at the time so we can only be strict about
         // checking this for more recent implementations.
         if get_vsr_api_level() >= 35 {
-            let result = key_generations::map_ks_error(sec_level.createOperation(
+            let result = key_generations::map_ks_error(sl.binder.createOperation(
                 &key_metadata.key,
                 &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(digest),
                 false,
@@ -394,12 +383,11 @@ fn keystore2_ec_25519_generate_key_fail() {
 /// `INCOMPATIBLE_DIGEST` error as there is a mismatch of digest mode in key authorizations.
 #[test]
 fn keystore2_create_op_with_incompatible_key_digest() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = "ks_ec_test_incomp_key_digest";
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::APP,
         -1,
         Some(alias.to_string()),
@@ -412,7 +400,7 @@ fn keystore2_create_op_with_incompatible_key_digest() {
         [Digest::NONE, Digest::SHA1, Digest::SHA_2_224, Digest::SHA_2_384, Digest::SHA_2_512];
 
     for digest in digests {
-        let result = key_generations::map_ks_error(sec_level.createOperation(
+        let result = key_generations::map_ks_error(sl.binder.createOperation(
             &key_metadata.key,
             &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(digest),
             false,
@@ -488,11 +476,10 @@ fn keystore2_key_owner_validation() {
 /// successfully.
 #[test]
 fn keystore2_generate_key_with_blob_domain() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let key_metadata = key_generations::generate_ec_key(
-        &sec_level,
+        &sl,
         Domain::BLOB,
         key_generations::SELINUX_SHELL_NAMESPACE,
         None,
@@ -507,7 +494,7 @@ fn keystore2_generate_key_with_blob_domain() {
     // Must have the key blob.
     assert!(key_metadata.key.blob.is_some());
 
-    let op_response = key_generations::map_ks_error(sec_level.createOperation(
+    let op_response = key_generations::map_ks_error(sl.binder.createOperation(
         &key_metadata.key,
         &authorizations::AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256),
         false,
@@ -522,5 +509,5 @@ fn keystore2_generate_key_with_blob_domain() {
     );
 
     // Delete the generated key blob.
-    sec_level.deleteKey(&key_metadata.key).unwrap();
+    sl.binder.deleteKey(&key_metadata.key).unwrap();
 }

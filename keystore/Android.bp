@@ -20,14 +20,14 @@ cc_defaults {
 
     sanitize: {
         misc_undefined: [
-             "signed-integer-overflow",
-             "unsigned-integer-overflow",
-             "shift",
-             "integer-divide-by-zero",
-             "implicit-unsigned-integer-truncation",
-             // BUG: 123630767
-             //"implicit-signed-integer-truncation",
-             "implicit-integer-sign-change",
+            "signed-integer-overflow",
+            "unsigned-integer-overflow",
+            "shift",
+            "integer-divide-by-zero",
+            "implicit-unsigned-integer-truncation",
+            // BUG: 123630767
+            //"implicit-signed-integer-truncation",
+            "implicit-integer-sign-change",
         ],
     },
 
@@ -66,7 +66,10 @@ cc_binary {
 // in Tag::ATTESTATION_APPLICATION_ID
 cc_library {
     name: "libkeystore-attestation-application-id",
-    defaults: ["keystore_defaults"],
+    defaults: [
+        "keystore_defaults",
+        "keystore2_use_latest_aidl_ndk_shared",
+    ],
 
     srcs: [
         "keystore_attestation_id.cpp",

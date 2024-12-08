@@ -30,7 +30,10 @@ rust_defaults {
         "keystore2_use_latest_aidl_rust",
         "structured_log_rust_defaults",
     ],
-
+    cfgs: select(release_flag("RELEASE_AVF_ENABLE_EARLY_VM"), {
+        true: ["early_vm"],
+        default: [],
+    }),
     rustlibs: [
         "android.hardware.security.rkp-V3-rust",
         "android.hardware.security.secureclock-V1-rust",
@@ -53,7 +56,6 @@ rust_defaults {
         "libkeystore2_hal_names_rust",
         "libkeystore2_km_compat",
         "libkeystore2_selinux",
-        "liblazy_static",
         "liblibc",
         "liblog_rust",
         "libmessage_macro",
@@ -111,6 +113,7 @@ rust_test {
         "liblibsqlite3_sys",
         "libnix",
         "librusqlite",
+        "libtempfile",
     ],
     // The test should always include watchdog.
     features: [
@@ -160,6 +163,11 @@ aconfig_declarations {
     package: "android.security.keystore2",
     container: "system",
     srcs: ["aconfig/flags.aconfig"],
+}
+
+java_aconfig_library {
+    name: "keystore2_flags_java",
+    aconfig_declarations: "keystore2_flags",
 }
 
 rust_aconfig_library {

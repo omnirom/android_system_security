@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nix::unistd::{getuid, Gid, Uid};
-use rustutils::users::AID_USER_OFFSET;
-use std::collections::HashSet;
-use std::fmt::Write;
-
-use android_hardware_security_keymint::aidl::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use crate::keystore2_client_test_utils::{delete_all_entries, delete_app_key, verify_aliases};
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
     KeyPermission::KeyPermission, ResponseCode::ResponseCode,
 };
-
-use crate::keystore2_client_test_utils::{delete_all_entries, delete_app_key, verify_aliases};
-use keystore2_test_utils::{get_keystore_service, key_generations, key_generations::Error, run_as};
+use keystore2_test_utils::{
+    get_keystore_service, key_generations, key_generations::Error, run_as, SecLevel,
+};
+use nix::unistd::{getuid, Gid, Uid};
+use rustutils::users::AID_USER_OFFSET;
+use std::collections::HashSet;
+use std::fmt::Write;
 
 /// Try to find a key with given key parameters using `listEntries` API.
 fn key_alias_exists(
@@ -63,20 +62,19 @@ fn keystore2_list_entries_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             let alias = format!("list_entries_grant_key1_{}", getuid());
 
             // Make sure there is no key exist with this `alias` in `SELINUX` domain and
             // `SELINUX_SHELL_NAMESPACE` namespace.
             if key_alias_exists(
-                &keystore2,
+                &sl.keystore2,
                 Domain::SELINUX,
                 key_generations::SELINUX_SHELL_NAMESPACE,
                 alias.to_string(),
             ) {
-                keystore2
+                sl.keystore2
                     .deleteKey(&KeyDescriptor {
                         domain: Domain::SELINUX,
                         nspace: key_generations::SELINUX_SHELL_NAMESPACE,
@@ -88,7 +86,7 @@ fn keystore2_list_entries_success() {
 
             // Generate a key with above defined `alias`.
             let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sec_level,
+                &sl,
                 Domain::SELINUX,
                 key_generations::SELINUX_SHELL_NAMESPACE,
                 Some(alias.to_string()),
@@ -99,7 +97,7 @@ fn keystore2_list_entries_success() {
             // Verify that above generated key entry is listed with domain SELINUX and
             // namespace SELINUX_SHELL_NAMESPACE
             assert!(key_alias_exists(
-                &keystore2,
+                &sl.keystore2,
                 Domain::SELINUX,
                 key_generations::SELINUX_SHELL_NAMESPACE,
                 alias,
@@ -107,7 +105,7 @@ fn keystore2_list_entries_success() {
 
             // Grant a key with GET_INFO permission.
             let access_vector = KeyPermission::GET_INFO.0;
-            keystore2
+            sl.keystore2
                 .grant(&key_metadata.key, GRANTEE_UID.try_into().unwrap(), access_vector)
                 .unwrap();
         })
@@ -121,13 +119,11 @@ fn keystore2_list_entries_success() {
             Uid::from_raw(GRANTEE_UID),
             Gid::from_raw(GRANTEE_GID),
             move || {
-                let keystore2 = get_keystore_service();
-                let sec_level =
-                    keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+                let sl = SecLevel::tee();
                 let alias = format!("list_entries_success_key{}", getuid());
 
                 let key_metadata = key_generations::generate_ec_p256_signing_key(
-                    &sec_level,
+                    &sl,
                     Domain::APP,
                     -1,
                     Some(alias.to_string()),
@@ -137,7 +133,7 @@ fn keystore2_list_entries_success() {
 
                 // Make sure there is only one key entry exist and that should be the same key
                 // generated in this user context. Granted key shouldn't be included in this list.
-                let key_descriptors = keystore2.listEntries(Domain::APP, -1).unwrap();
+                let key_descriptors = sl.keystore2.listEntries(Domain::APP, -1).unwrap();
                 assert_eq!(1, key_descriptors.len());
 
                 let key = key_descriptors.first().unwrap();
@@ -145,9 +141,9 @@ fn keystore2_list_entries_success() {
                 assert_eq!(key.nspace, GRANTEE_UID.try_into().unwrap());
                 assert_eq!(key.domain, Domain::APP);
 
-                keystore2.deleteKey(&key_metadata.key).unwrap();
+                sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 
-                let key_descriptors = keystore2.listEntries(Domain::APP, -1).unwrap();
+                let key_descriptors = sl.keystore2.listEntries(Domain::APP, -1).unwrap();
                 assert_eq!(0, key_descriptors.len());
             },
         )
@@ -204,14 +200,13 @@ fn keystore2_list_entries_with_long_aliases_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(CLIENT_CTX, Uid::from_raw(CLIENT_UID), Gid::from_raw(CLIENT_GID), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             // Make sure there are no keystore entries exist before adding new entries.
-            let key_descriptors = keystore2.listEntries(Domain::APP, -1).unwrap();
+            let key_descriptors = sl.keystore2.listEntries(Domain::APP, -1).unwrap();
             if !key_descriptors.is_empty() {
                 key_descriptors.into_iter().map(|key| key.alias.unwrap()).for_each(|alias| {
-                    delete_app_key(&keystore2, &alias).unwrap();
+                    delete_app_key(&sl.keystore2, &alias).unwrap();
                 });
             }
 
@@ -223,8 +218,7 @@ fn keystore2_list_entries_with_long_aliases_success() {
                 write!(alias, "{}_{}", "X".repeat(6000), count).unwrap();
                 imported_key_aliases.insert(alias.clone());
 
-                let result =
-                    key_generations::import_aes_key(&sec_level, Domain::APP, -1, Some(alias));
+                let result = key_generations::import_aes_key(&sl, Domain::APP, -1, Some(alias));
                 assert!(result.is_ok());
             }
 
@@ -237,7 +231,7 @@ fn keystore2_list_entries_with_long_aliases_success() {
             //    list of key aliases
             //  - continue above steps till it cleanup all the imported keystore entries.
             while !imported_key_aliases.is_empty() {
-                let key_descriptors = keystore2.listEntries(Domain::APP, -1).unwrap();
+                let key_descriptors = sl.keystore2.listEntries(Domain::APP, -1).unwrap();
 
                 // Check retrieved key entries list is a subset of imported keys list.
                 assert!(key_descriptors
@@ -246,7 +240,7 @@ fn keystore2_list_entries_with_long_aliases_success() {
 
                 // Delete the listed key entries from Keystore as well as from imported keys list.
                 key_descriptors.into_iter().map(|key| key.alias.unwrap()).for_each(|alias| {
-                    delete_app_key(&keystore2, &alias).unwrap();
+                    delete_app_key(&sl.keystore2, &alias).unwrap();
                     assert!(imported_key_aliases.remove(&alias));
                 });
             }
@@ -271,17 +265,16 @@ fn keystore2_list_entries_batched_with_long_aliases_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(CLIENT_CTX, Uid::from_raw(CLIENT_UID), Gid::from_raw(CLIENT_GID), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             // Make sure there are no keystore entries exist before adding new entries.
-            delete_all_entries(&keystore2);
+            delete_all_entries(&sl.keystore2);
 
             // Import 100 keys with aliases of length 6000.
             let mut imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, "X".repeat(6000), 1..101).unwrap();
+                key_generations::import_aes_keys(&sl, "X".repeat(6000), 1..101).unwrap();
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 100,
                 "Error while importing keys"
             );
@@ -290,7 +283,7 @@ fn keystore2_list_entries_batched_with_long_aliases_success() {
             let mut alias;
             while !imported_key_aliases.is_empty() {
                 let key_descriptors =
-                    keystore2.listEntriesBatched(Domain::APP, -1, start_past_alias).unwrap();
+                    sl.keystore2.listEntriesBatched(Domain::APP, -1, start_past_alias).unwrap();
 
                 // Check retrieved key entries list is a subset of imported keys list.
                 assert!(key_descriptors
@@ -306,9 +299,9 @@ fn keystore2_list_entries_batched_with_long_aliases_success() {
             }
 
             assert!(imported_key_aliases.is_empty());
-            delete_all_entries(&keystore2);
+            delete_all_entries(&sl.keystore2);
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 0,
                 "Error while doing cleanup"
             );
@@ -339,25 +332,23 @@ fn keystore2_list_entries_batched_with_multi_procs_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(CLIENT_CTX, Uid::from_raw(CLIENT_UID), Gid::from_raw(CLIENT_GID), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             // Make sure there are no keystore entries exist before adding new entries.
-            delete_all_entries(&keystore2);
+            delete_all_entries(&sl.keystore2);
 
             // Import 3 keys with below aliases -
             // [key_test_batch_list_1, key_test_batch_list_2, key_test_batch_list_3]
             let imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, ALIAS_PREFIX.to_string(), 1..4)
-                    .unwrap();
+                key_generations::import_aes_keys(&sl, ALIAS_PREFIX.to_string(), 1..4).unwrap();
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 3,
                 "Error while importing keys"
             );
 
             // List all entries in keystore for this user-id.
-            let key_descriptors = keystore2.listEntriesBatched(Domain::APP, -1, None).unwrap();
+            let key_descriptors = sl.keystore2.listEntriesBatched(Domain::APP, -1, None).unwrap();
             assert_eq!(key_descriptors.len(), 3);
 
             // Makes sure all listed aliases are matching with imported keys aliases.
@@ -370,20 +361,18 @@ fn keystore2_list_entries_batched_with_multi_procs_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(CLIENT_CTX, Uid::from_raw(CLIENT_UID), Gid::from_raw(CLIENT_GID), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             // Import another 5 keys with below aliases -
             // [ key_test_batch_list_4, key_test_batch_list_5, key_test_batch_list_6,
             //   key_test_batch_list_7, key_test_batch_list_8 ]
             let mut imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, ALIAS_PREFIX.to_string(), 4..9)
-                    .unwrap();
+                key_generations::import_aes_keys(&sl, ALIAS_PREFIX.to_string(), 4..9).unwrap();
 
             // Above context already 3 keys are imported, in this context 5 keys are imported,
             // total 8 keystore entries are expected to be present in Keystore for this user-id.
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 8,
                 "Error while importing keys"
             );
@@ -391,7 +380,8 @@ fn keystore2_list_entries_batched_with_multi_procs_success() {
             // List keystore entries with `start_past_alias` as "key_test_batch_list_3".
             // `listEntriesBatched` should list all the keystore entries with
             // alias > "key_test_batch_list_3".
-            let key_descriptors = keystore2
+            let key_descriptors = sl
+                .keystore2
                 .listEntriesBatched(Domain::APP, -1, Some("key_test_batch_list_3"))
                 .unwrap();
             assert_eq!(key_descriptors.len(), 5);
@@ -403,7 +393,7 @@ fn keystore2_list_entries_batched_with_multi_procs_success() {
 
             // List all keystore entries with `start_past_alias` as `None`.
             // `listEntriesBatched` should list all the keystore entries.
-            let key_descriptors = keystore2.listEntriesBatched(Domain::APP, -1, None).unwrap();
+            let key_descriptors = sl.keystore2.listEntriesBatched(Domain::APP, -1, None).unwrap();
             assert_eq!(key_descriptors.len(), 8);
 
             // Include previously imported keys aliases as well
@@ -416,9 +406,9 @@ fn keystore2_list_entries_batched_with_multi_procs_success() {
                 .iter()
                 .all(|key| imported_key_aliases.contains(key.alias.as_ref().unwrap())));
 
-            delete_all_entries(&keystore2);
+            delete_all_entries(&sl.keystore2);
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 0,
                 "Error while doing cleanup"
             );
@@ -459,23 +449,23 @@ fn keystore2_list_entries_batched_with_empty_keystore_success() {
 /// Test should successfully list the imported key.
 #[test]
 fn keystore2_list_entries_batched_with_selinux_domain_success() {
-    let keystore2 = get_keystore_service();
-    let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+    let sl = SecLevel::tee();
 
     let alias = "test_selinux_key_list_alias_batched";
-    let _result = keystore2.deleteKey(&KeyDescriptor {
+    let _result = sl.keystore2.deleteKey(&KeyDescriptor {
         domain: Domain::SELINUX,
         nspace: key_generations::SELINUX_SHELL_NAMESPACE,
         alias: Some(alias.to_string()),
         blob: None,
     });
 
-    let initial_count = keystore2
+    let initial_count = sl
+        .keystore2
         .getNumberOfEntries(Domain::SELINUX, key_generations::SELINUX_SHELL_NAMESPACE)
         .unwrap();
 
     key_generations::import_aes_key(
-        &sec_level,
+        &sl,
         Domain::SELINUX,
         key_generations::SELINUX_SHELL_NAMESPACE,
         Some(alias.to_string()),
@@ -483,14 +473,15 @@ fn keystore2_list_entries_batched_with_selinux_domain_success() {
     .unwrap();
 
     assert_eq!(
-        keystore2
+        sl.keystore2
             .getNumberOfEntries(Domain::SELINUX, key_generations::SELINUX_SHELL_NAMESPACE)
             .unwrap(),
         initial_count + 1,
         "Error while getting number of keystore entries accessible."
     );
 
-    let key_descriptors = keystore2
+    let key_descriptors = sl
+        .keystore2
         .listEntriesBatched(Domain::SELINUX, key_generations::SELINUX_SHELL_NAMESPACE, None)
         .unwrap();
     assert_eq!(key_descriptors.len(), (initial_count + 1) as usize);
@@ -499,7 +490,7 @@ fn keystore2_list_entries_batched_with_selinux_domain_success() {
         key_descriptors.into_iter().map(|key| key.alias.unwrap()).filter(|a| a == alias).count();
     assert_eq!(count, 1);
 
-    keystore2
+    sl.keystore2
         .deleteKey(&KeyDescriptor {
             domain: Domain::SELINUX,
             nspace: key_generations::SELINUX_SHELL_NAMESPACE,
@@ -522,11 +513,10 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
     // SAFETY: The test is run in a separate process with no other threads.
     unsafe {
         run_as::run_as(CLIENT_CTX, Uid::from_raw(CLIENT_UID), Gid::from_raw(CLIENT_GID), || {
-            let keystore2 = get_keystore_service();
-            let sec_level = keystore2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).unwrap();
+            let sl = SecLevel::tee();
 
             // Make sure there are no keystore entries exist before adding new entries.
-            delete_all_entries(&keystore2);
+            delete_all_entries(&sl.keystore2);
 
             // Import keys with below mentioned aliases -
             // [
@@ -542,48 +532,49 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
             //   key_test_batch_list_22,
             // ]
             let _imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, ALIAS_PREFIX.to_string(), 1..6)
-                    .unwrap();
+                key_generations::import_aes_keys(&sl, ALIAS_PREFIX.to_string(), 1..6).unwrap();
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 5,
                 "Error while importing keys"
             );
             let _imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, ALIAS_PREFIX.to_string(), 10..13)
-                    .unwrap();
+                key_generations::import_aes_keys(&sl, ALIAS_PREFIX.to_string(), 10..13).unwrap();
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 8,
                 "Error while importing keys"
             );
             let _imported_key_aliases =
-                key_generations::import_aes_keys(&sec_level, ALIAS_PREFIX.to_string(), 21..23)
-                    .unwrap();
+                key_generations::import_aes_keys(&sl, ALIAS_PREFIX.to_string(), 21..23).unwrap();
             assert_eq!(
-                keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
+                sl.keystore2.getNumberOfEntries(Domain::APP, -1).unwrap(),
                 10,
                 "Error while importing keys"
             );
 
             // List the aliases using given `startingPastAlias` and verify the listed
             // aliases with the expected list of aliases.
-            verify_aliases(&keystore2, Some(format!("{}{}", ALIAS_PREFIX, "_5").as_str()), vec![]);
+            verify_aliases(
+                &sl.keystore2,
+                Some(format!("{}{}", ALIAS_PREFIX, "_5").as_str()),
+                vec![],
+            );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 Some(format!("{}{}", ALIAS_PREFIX, "_4").as_str()),
                 vec![ALIAS_PREFIX.to_owned() + "_5"],
             );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 Some(format!("{}{}", ALIAS_PREFIX, "_3").as_str()),
                 vec![ALIAS_PREFIX.to_owned() + "_4", ALIAS_PREFIX.to_owned() + "_5"],
             );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 Some(format!("{}{}", ALIAS_PREFIX, "_2").as_str()),
                 vec![
                     ALIAS_PREFIX.to_owned() + "_21",
@@ -595,7 +586,7 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
             );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 Some(format!("{}{}", ALIAS_PREFIX, "_1").as_str()),
                 vec![
                     ALIAS_PREFIX.to_owned() + "_10",
@@ -611,7 +602,7 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
             );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 Some(ALIAS_PREFIX),
                 vec![
                     ALIAS_PREFIX.to_owned() + "_1",
@@ -628,7 +619,7 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
             );
 
             verify_aliases(
-                &keystore2,
+                &sl.keystore2,
                 None,
                 vec![
                     ALIAS_PREFIX.to_owned() + "_1",

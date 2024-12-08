@@ -44,18 +44,15 @@ use android_security_metrics::aidl::android::security::metrics::{
     SecurityLevel::SecurityLevel as MetricsSecurityLevel, Storage::Storage as MetricsStorage,
 };
 use anyhow::{anyhow, Context, Result};
-use lazy_static::lazy_static;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 // Note: Crash events are recorded at keystore restarts, based on the assumption that keystore only
 // gets restarted after a crash, during a boot cycle.
 const KEYSTORE_CRASH_COUNT_PROPERTY: &str = "keystore.crash_count";
 
-lazy_static! {
-    /// Singleton for MetricsStore.
-    pub static ref METRICS_STORE: MetricsStore = Default::default();
-}
+/// Singleton for MetricsStore.
+pub static METRICS_STORE: LazyLock<MetricsStore> = LazyLock::new(Default::default);
 
 /// MetricsStore stores the <atom object, count> as <key, value> in the inner hash map,
 /// indexed by the atom id, in the outer hash map.
@@ -72,6 +69,26 @@ pub struct MetricsStore {
     metrics_store: Mutex<HashMap<AtomID, HashMap<KeystoreAtomPayload, i32>>>,
 }
 
+impl std::fmt::Debug for MetricsStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let store = self.metrics_store.lock().unwrap();
+        let mut atom_ids: Vec<&AtomID> = store.keys().collect();
+        atom_ids.sort();
+        for atom_id in atom_ids {
+            writeln!(f, "  {} : [", atom_id.show())?;
+            let data = store.get(atom_id).unwrap();
+            let mut payloads: Vec<&KeystoreAtomPayload> = data.keys().collect();
+            payloads.sort();
+            for payload in payloads {
+                let count = data.get(payload).unwrap();
+                writeln!(f, "    {} => count={count}", payload.show())?;
+            }
+            writeln!(f, "  ]")?;
+        }
+        Ok(())
+    }
+}
+
 impl MetricsStore {
     /// There are some atoms whose maximum cardinality exceeds the cardinality limits tolerated
     /// by statsd. Statsd tolerates cardinality between 200-300. Therefore, the in-memory storage
@@ -85,7 +102,7 @@ impl MetricsStore {
     /// empty vector.
     pub fn get_atoms(&self, atom_id: AtomID) -> Result<Vec<KeystoreAtom>> {
         // StorageStats is an original pulled atom (i.e. not a pushed atom converted to a
-        // pulledd atom). Therefore, it is handled separately.
+        // pulled atom). Therefore, it is handled separately.
         if AtomID::STORAGE_STATS == atom_id {
             return pull_storage_stats();
         }
@@ -519,7 +536,7 @@ fn compute_purpose_bitmap(purpose_bitmap: &mut i32, purpose: KeyPurpose) {
     }
 }
 
-fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
+pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
     let mut atom_vec: Vec<KeystoreAtom> = Vec::new();
     let mut append = |stat| {
         match stat {
@@ -679,4 +696,310 @@ enum KeyPurposeBitPosition {
     AGREE_KEY_BIT_POS = 6,
     ///Bit position in the KeyPurpose bitmap for Attest Key.
     ATTEST_KEY_BIT_POS = 7,
+}
+
+/// The various metrics-related types are not defined in this crate, so the orphan
+/// trait rule means that `std::fmt::Debug` cannot be implemented for them.
+/// Instead, create our own local trait that generates a debug string for a type.
+trait Summary {
+    fn show(&self) -> String;
+}
+
+/// Implement the [`Summary`] trait for AIDL-derived pseudo-enums, mapping named enum values to
+/// specified short names, all padded with spaces to the specified width (to allow improved
+/// readability when printed in a group).
+macro_rules! impl_summary_enum {
+    {  $enum:ident, $width:literal, $( $variant:ident => $short:literal ),+ $(,)? } => {
+        impl Summary for $enum{
+            fn show(&self) -> String {
+                match self.0 {
+                    $(
+                        x if x == Self::$variant.0 => format!(concat!("{:",
+                                                                      stringify!($width),
+                                                                      "}"),
+                                                              $short),
+                    )*
+                    v => format!("Unknown({})", v),
+                }
+            }
+        }
+    }
+}
+
+impl_summary_enum!(AtomID, 14,
+    STORAGE_STATS => "STORAGE",
+    KEYSTORE2_ATOM_WITH_OVERFLOW => "OVERFLOW",
+    KEY_CREATION_WITH_GENERAL_INFO => "KEYGEN_GENERAL",
+    KEY_CREATION_WITH_AUTH_INFO => "KEYGEN_AUTH",
+    KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO => "KEYGEN_MODES",
+    KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO => "KEYOP_MODES",
+    KEY_OPERATION_WITH_GENERAL_INFO => "KEYOP_GENERAL",
+    RKP_ERROR_STATS => "RKP_ERR",
+    CRASH_STATS => "CRASH",
+);
+
+impl_summary_enum!(MetricsStorage, 28,
+    STORAGE_UNSPECIFIED => "UNSPECIFIED",
+    KEY_ENTRY => "KEY_ENTRY",
+    KEY_ENTRY_ID_INDEX => "KEY_ENTRY_ID_IDX" ,
+    KEY_ENTRY_DOMAIN_NAMESPACE_INDEX => "KEY_ENTRY_DOMAIN_NS_IDX" ,
+    BLOB_ENTRY => "BLOB_ENTRY",
+    BLOB_ENTRY_KEY_ENTRY_ID_INDEX => "BLOB_ENTRY_KEY_ENTRY_ID_IDX" ,
+    KEY_PARAMETER => "KEY_PARAMETER",
+    KEY_PARAMETER_KEY_ENTRY_ID_INDEX => "KEY_PARAM_KEY_ENTRY_ID_IDX" ,
+    KEY_METADATA => "KEY_METADATA",
+    KEY_METADATA_KEY_ENTRY_ID_INDEX => "KEY_META_KEY_ENTRY_ID_IDX" ,
+    GRANT => "GRANT",
+    AUTH_TOKEN => "AUTH_TOKEN",
+    BLOB_METADATA => "BLOB_METADATA",
+    BLOB_METADATA_BLOB_ENTRY_ID_INDEX => "BLOB_META_BLOB_ENTRY_ID_IDX" ,
+    METADATA => "METADATA",
+    DATABASE => "DATABASE",
+    LEGACY_STORAGE => "LEGACY_STORAGE",
+);
+
+impl_summary_enum!(MetricsAlgorithm, 4,
+    ALGORITHM_UNSPECIFIED => "NONE",
+    RSA => "RSA",
+    EC => "EC",
+    AES => "AES",
+    TRIPLE_DES => "DES",
+    HMAC => "HMAC",
+);
+
+impl_summary_enum!(MetricsEcCurve, 5,
+    EC_CURVE_UNSPECIFIED => "NONE",
+    P_224 => "P-224",
+    P_256 => "P-256",
+    P_384 => "P-384",
+    P_521 => "P-521",
+    CURVE_25519 => "25519",
+);
+
+impl_summary_enum!(MetricsKeyOrigin, 10,
+    ORIGIN_UNSPECIFIED => "UNSPEC",
+    GENERATED => "GENERATED",
+    DERIVED => "DERIVED",
+    IMPORTED => "IMPORTED",
+    RESERVED => "RESERVED",
+    SECURELY_IMPORTED => "SEC-IMPORT",
+);
+
+impl_summary_enum!(MetricsSecurityLevel, 9,
+    SECURITY_LEVEL_UNSPECIFIED => "UNSPEC",
+    SECURITY_LEVEL_SOFTWARE => "SOFTWARE",
+    SECURITY_LEVEL_TRUSTED_ENVIRONMENT => "TEE",
+    SECURITY_LEVEL_STRONGBOX => "STRONGBOX",
+    SECURITY_LEVEL_KEYSTORE => "KEYSTORE",
+);
+
+// Metrics values for HardwareAuthenticatorType are broken -- the AIDL type is a bitmask
+// not an enum, so offseting the enum values by 1 doesn't work.
+impl_summary_enum!(MetricsHardwareAuthenticatorType, 6,
+    AUTH_TYPE_UNSPECIFIED => "UNSPEC",
+    NONE => "NONE",
+    PASSWORD => "PASSWD",
+    FINGERPRINT => "FPRINT",
+    ANY => "ANY",
+);
+
+impl_summary_enum!(MetricsPurpose, 7,
+    KEY_PURPOSE_UNSPECIFIED => "UNSPEC",
+    ENCRYPT => "ENCRYPT",
+    DECRYPT => "DECRYPT",
+    SIGN => "SIGN",
+    VERIFY => "VERIFY",
+    WRAP_KEY => "WRAPKEY",
+    AGREE_KEY => "AGREEKY",
+    ATTEST_KEY => "ATTESTK",
+);
+
+impl_summary_enum!(MetricsOutcome, 7,
+    OUTCOME_UNSPECIFIED => "UNSPEC",
+    DROPPED => "DROPPED",
+    SUCCESS => "SUCCESS",
+    ABORT => "ABORT",
+    PRUNED => "PRUNED",
+    ERROR => "ERROR",
+);
+
+impl_summary_enum!(MetricsRkpError, 6,
+    RKP_ERROR_UNSPECIFIED => "UNSPEC",
+    OUT_OF_KEYS => "OOKEYS",
+    FALL_BACK_DURING_HYBRID => "FALLBK",
+);
+
+/// Convert an argument into a corresponding format clause.  (This is needed because
+/// macro expansion text for repeated inputs needs to mention one of the repeated
+/// inputs.)
+macro_rules! format_clause {
+    {  $ignored:ident } => { "{}" }
+}
+
+/// Generate code to print a string corresponding to a bitmask, where the given
+/// enum identifies which bits mean what.  If additional bits (not included in
+/// the enum variants) are set, include the whole bitmask in the output so no
+/// information is lost.
+macro_rules! show_enum_bitmask {
+    {  $v:expr, $enum:ident, $( $variant:ident => $short:literal ),+ $(,)? } => {
+        {
+            let v: i32 = $v;
+            let mut displayed_mask = 0i32;
+            $(
+                displayed_mask |= 1 << $enum::$variant as i32;
+            )*
+            let undisplayed_mask = !displayed_mask;
+            let undisplayed = v & undisplayed_mask;
+            let extra = if undisplayed == 0 {
+                "".to_string()
+            } else {
+                format!("(full:{v:#010x})")
+            };
+            format!(
+                concat!( $( format_clause!($variant), )* "{}"),
+                $(
+                    if v & 1 << $enum::$variant as i32 != 0 { $short } else { "-" },
+                )*
+                extra
+            )
+        }
+    }
+}
+
+fn show_purpose(v: i32) -> String {
+    show_enum_bitmask!(v, KeyPurposeBitPosition,
+        ATTEST_KEY_BIT_POS => "A",
+        AGREE_KEY_BIT_POS => "G",
+        WRAP_KEY_BIT_POS => "W",
+        VERIFY_BIT_POS => "V",
+        SIGN_BIT_POS => "S",
+        DECRYPT_BIT_POS => "D",
+        ENCRYPT_BIT_POS => "E",
+    )
+}
+
+fn show_padding(v: i32) -> String {
+    show_enum_bitmask!(v, PaddingModeBitPosition,
+        PKCS7_BIT_POS => "7",
+        RSA_PKCS1_1_5_SIGN_BIT_POS => "S",
+        RSA_PKCS1_1_5_ENCRYPT_BIT_POS => "E",
+        RSA_PSS_BIT_POS => "P",
+        RSA_OAEP_BIT_POS => "O",
+        NONE_BIT_POSITION => "N",
+    )
+}
+
+fn show_digest(v: i32) -> String {
+    show_enum_bitmask!(v, DigestBitPosition,
+        SHA_2_512_BIT_POS => "5",
+        SHA_2_384_BIT_POS => "3",
+        SHA_2_256_BIT_POS => "2",
+        SHA_2_224_BIT_POS => "4",
+        SHA_1_BIT_POS => "1",
+        MD5_BIT_POS => "M",
+        NONE_BIT_POSITION => "N",
+    )
+}
+
+fn show_blockmode(v: i32) -> String {
+    show_enum_bitmask!(v, BlockModeBitPosition,
+        GCM_BIT_POS => "G",
+        CTR_BIT_POS => "T",
+        CBC_BIT_POS => "C",
+        ECB_BIT_POS => "E",
+    )
+}
+
+impl Summary for KeystoreAtomPayload {
+    fn show(&self) -> String {
+        match self {
+            KeystoreAtomPayload::StorageStats(v) => {
+                format!("{} sz={} unused={}", v.storage_type.show(), v.size, v.unused_size)
+            }
+            KeystoreAtomPayload::KeyCreationWithGeneralInfo(v) => {
+                format!(
+                    "{} ksz={:>4} crv={} {} rc={:4} attest? {}",
+                    v.algorithm.show(),
+                    v.key_size,
+                    v.ec_curve.show(),
+                    v.key_origin.show(),
+                    v.error_code,
+                    if v.attestation_requested { "Y" } else { "N" }
+                )
+            }
+            KeystoreAtomPayload::KeyCreationWithAuthInfo(v) => {
+                format!(
+                    "auth={} log(time)={:3} sec={}",
+                    v.user_auth_type.show(),
+                    v.log10_auth_key_timeout_seconds,
+                    v.security_level.show()
+                )
+            }
+            KeystoreAtomPayload::KeyCreationWithPurposeAndModesInfo(v) => {
+                format!(
+                    "{} purpose={} padding={} digest={} blockmode={}",
+                    v.algorithm.show(),
+                    show_purpose(v.purpose_bitmap),
+                    show_padding(v.padding_mode_bitmap),
+                    show_digest(v.digest_bitmap),
+                    show_blockmode(v.block_mode_bitmap),
+                )
+            }
+            KeystoreAtomPayload::KeyOperationWithGeneralInfo(v) => {
+                format!(
+                    "{} {:>8} upgraded? {} sec={}",
+                    v.outcome.show(),
+                    v.error_code,
+                    if v.key_upgraded { "Y" } else { "N" },
+                    v.security_level.show()
+                )
+            }
+            KeystoreAtomPayload::KeyOperationWithPurposeAndModesInfo(v) => {
+                format!(
+                    "{} padding={} digest={} blockmode={}",
+                    v.purpose.show(),
+                    show_padding(v.padding_mode_bitmap),
+                    show_digest(v.digest_bitmap),
+                    show_blockmode(v.block_mode_bitmap)
+                )
+            }
+            KeystoreAtomPayload::RkpErrorStats(v) => {
+                format!("{} sec={}", v.rkpError.show(), v.security_level.show())
+            }
+            KeystoreAtomPayload::CrashStats(v) => {
+                format!("count={}", v.count_of_crash_events)
+            }
+            KeystoreAtomPayload::Keystore2AtomWithOverflow(v) => {
+                format!("atom={}", v.atom_id.show())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enum_show() {
+        let algo = MetricsAlgorithm::RSA;
+        assert_eq!("RSA ", algo.show());
+        let algo = MetricsAlgorithm(42);
+        assert_eq!("Unknown(42)", algo.show());
+    }
+
+    #[test]
+    fn test_enum_bitmask_show() {
+        let mut modes = 0i32;
+        compute_block_mode_bitmap(&mut modes, BlockMode::ECB);
+        compute_block_mode_bitmap(&mut modes, BlockMode::CTR);
+
+        assert_eq!(show_blockmode(modes), "-T-E");
+
+        // Add some bits not covered by the enum of valid bit positions.
+        modes |= 0xa0;
+        assert_eq!(show_blockmode(modes), "-T-E(full:0x000000aa)");
+        modes |= 0x300;
+        assert_eq!(show_blockmode(modes), "-T-E(full:0x000003aa)");
+    }
 }
