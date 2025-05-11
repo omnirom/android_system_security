@@ -214,6 +214,12 @@ where
     fn sendRootOfTrust(&self, root_of_trust: &[u8]) -> binder::Result<()> {
         self.real.sendRootOfTrust(root_of_trust)
     }
+    fn setAdditionalAttestationInfo(
+        &self,
+        additional_attestation_info: &[KeyParameter],
+    ) -> binder::Result<()> {
+        self.real.setAdditionalAttestationInfo(additional_attestation_info)
+    }
 
     // For methods that emit keyblobs, check whether the underlying real device
     // supports the relevant parameters, and forward to the appropriate device.

@@ -18,8 +18,9 @@ use std::ops::Deref;
 
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
-    KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose,
-    PaddingMode::PaddingMode, Tag::Tag,
+    HardwareAuthenticatorType::HardwareAuthenticatorType, KeyParameter::KeyParameter,
+    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
+    Tag::Tag,
 };
 
 /// Helper struct to create set of Authorizations.
@@ -366,6 +367,33 @@ impl AuthSetBuilder {
         self.0.push(KeyParameter {
             tag: Tag::UNLOCKED_DEVICE_REQUIRED,
             value: KeyParameterValue::BoolValue(true),
+        });
+        self
+    }
+
+    /// Set user secure ID.
+    pub fn user_secure_id(mut self, sid: i64) -> Self {
+        self.0.push(KeyParameter {
+            tag: Tag::USER_SECURE_ID,
+            value: KeyParameterValue::LongInteger(sid),
+        });
+        self
+    }
+
+    /// Set user auth type.
+    pub fn user_auth_type(mut self, auth_type: HardwareAuthenticatorType) -> Self {
+        self.0.push(KeyParameter {
+            tag: Tag::USER_AUTH_TYPE,
+            value: KeyParameterValue::HardwareAuthenticatorType(auth_type),
+        });
+        self
+    }
+
+    /// Set auth timeout.
+    pub fn auth_timeout(mut self, timeout_secs: i32) -> Self {
+        self.0.push(KeyParameter {
+            tag: Tag::AUTH_TIMEOUT,
+            value: KeyParameterValue::Integer(timeout_secs),
         });
         self
     }

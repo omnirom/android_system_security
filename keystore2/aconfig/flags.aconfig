@@ -40,3 +40,19 @@ flag {
   bug: "283077822"
   is_fixed_read_only: true
 }
+
+flag {
+  name: "use_blob_state_column"
+  namespace: "hardware_backed_security"
+  description: "Use state database column to track superseded blobentry rows"
+  bug: "319563050"
+  is_fixed_read_only: true
+}
+
+flag {
+  name: "attest_modules"
+  namespace: "hardware_backed_security"
+  description: "Support attestation of modules"
+  bug: "369375199"
+  is_fixed_read_only: true
+}

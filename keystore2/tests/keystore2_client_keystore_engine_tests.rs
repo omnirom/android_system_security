@@ -24,7 +24,6 @@ use keystore2_test_utils::ffi_test_utils::perform_crypto_op_using_keystore_engin
 use keystore2_test_utils::{
     authorizations::AuthSetBuilder, get_keystore_service, run_as, SecLevel,
 };
-use nix::unistd::{Gid, Uid};
 use openssl::x509::X509;
 use rustutils::users::AID_USER_OFFSET;
 
@@ -152,80 +151,65 @@ fn perform_crypto_op_using_granted_key(
 }
 
 #[test]
-fn keystore2_perofrm_crypto_op_using_keystore2_engine_rsa_key_success() {
-    static TARGET_SU_CTX: &str = "u:r:su:s0";
-
-    static GRANTEE_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
+fn keystore2_perform_crypto_op_using_keystore2_engine_rsa_key_success() {
     const USER_ID: u32 = 99;
     const APPLICATION_ID: u32 = 10001;
     static GRANTEE_UID: u32 = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
     static GRANTEE_GID: u32 = GRANTEE_UID;
 
     // Generate a key and grant it to a user with GET_INFO|USE|DELETE key permissions.
-    // SAFETY: The test is run in a separate process with no other threads.
-    let grant_key_nspace = unsafe {
-        run_as::run_as(TARGET_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let sl = SecLevel::tee();
-            let alias = "keystore2_engine_rsa_key";
-            generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::RSA).unwrap()
-        })
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let alias = "keystore2_engine_rsa_key";
+        generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::RSA).unwrap()
     };
 
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let grant_key_nspace = unsafe { run_as::run_as_root(grantor_fn) };
+
     // In grantee context load the key and try to perform crypto operation.
-    // SAFETY: The test is run in a separate process with no other threads.
-    unsafe {
-        run_as::run_as(
-            GRANTEE_CTX,
-            Uid::from_raw(GRANTEE_UID),
-            Gid::from_raw(GRANTEE_GID),
-            move || {
-                let keystore2 = get_keystore_service();
-                perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
-            },
-        )
+    let grantee_fn = move || {
+        let keystore2 = get_keystore_service();
+        perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, grantee_fn) };
 }
 
 #[test]
-fn keystore2_perofrm_crypto_op_using_keystore2_engine_ec_key_success() {
-    static TARGET_SU_CTX: &str = "u:r:su:s0";
-
-    static GRANTEE_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
+fn keystore2_perform_crypto_op_using_keystore2_engine_ec_key_success() {
     const USER_ID: u32 = 99;
     const APPLICATION_ID: u32 = 10001;
     static GRANTEE_UID: u32 = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
     static GRANTEE_GID: u32 = GRANTEE_UID;
 
     // Generate a key and grant it to a user with GET_INFO|USE|DELETE key permissions.
-    // SAFETY: The test is run in a separate process with no other threads.
-    let grant_key_nspace = unsafe {
-        run_as::run_as(TARGET_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let sl = SecLevel::tee();
-            let alias = "keystore2_engine_ec_test_key";
-            generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::EC).unwrap()
-        })
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let alias = "keystore2_engine_ec_test_key";
+        generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::EC).unwrap()
     };
 
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let grant_key_nspace = unsafe { run_as::run_as_root(grantor_fn) };
+
     // In grantee context load the key and try to perform crypto operation.
-    // SAFETY: The test is run in a separate process with no other threads.
-    unsafe {
-        run_as::run_as(
-            GRANTEE_CTX,
-            Uid::from_raw(GRANTEE_UID),
-            Gid::from_raw(GRANTEE_GID),
-            move || {
-                let keystore2 = get_keystore_service();
-                perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
-            },
-        )
+    let grantee_fn = move || {
+        let keystore2 = get_keystore_service();
+        perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, grantee_fn) };
 }
 
 #[test]
-fn keystore2_perofrm_crypto_op_using_keystore2_engine_pem_pub_key_success() {
-    static TARGET_SU_CTX: &str = "u:r:su:s0";
-
-    static GRANTEE_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
+fn keystore2_perform_crypto_op_using_keystore2_engine_pem_pub_key_success() {
     const USER_ID: u32 = 99;
     const APPLICATION_ID: u32 = 10001;
     static GRANTEE_UID: u32 = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
@@ -233,46 +217,43 @@ fn keystore2_perofrm_crypto_op_using_keystore2_engine_pem_pub_key_success() {
 
     // Generate a key and re-encode it's certificate as PEM and update it and
     // grant it to a user with GET_INFO|USE|DELETE key permissions.
-    // SAFETY: The test is run in a separate process with no other threads.
-    let grant_key_nspace = unsafe {
-        run_as::run_as(TARGET_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let sl = SecLevel::tee();
-            let alias = "keystore2_engine_rsa_pem_pub_key";
-            let grant_key_nspace =
-                generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::RSA).unwrap();
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let alias = "keystore2_engine_rsa_pem_pub_key";
+        let grant_key_nspace =
+            generate_key_and_grant_to_user(&sl, alias, GRANTEE_UID, Algorithm::RSA).unwrap();
 
-            // Update certificate with encodeed PEM data.
-            let key_entry_response = sl
-                .keystore2
-                .getKeyEntry(&KeyDescriptor {
-                    domain: Domain::APP,
-                    nspace: -1,
-                    alias: Some(alias.to_string()),
-                    blob: None,
-                })
-                .unwrap();
-            let cert_bytes = key_entry_response.metadata.certificate.as_ref().unwrap();
-            let cert = X509::from_der(cert_bytes.as_ref()).unwrap();
-            let cert_pem = cert.to_pem().unwrap();
-            sl.keystore2
-                .updateSubcomponent(&key_entry_response.metadata.key, Some(&cert_pem), None)
-                .expect("updateSubcomponent failed.");
+        // Update certificate with encodeed PEM data.
+        let key_entry_response = sl
+            .keystore2
+            .getKeyEntry(&KeyDescriptor {
+                domain: Domain::APP,
+                nspace: -1,
+                alias: Some(alias.to_string()),
+                blob: None,
+            })
+            .unwrap();
+        let cert_bytes = key_entry_response.metadata.certificate.as_ref().unwrap();
+        let cert = X509::from_der(cert_bytes.as_ref()).unwrap();
+        let cert_pem = cert.to_pem().unwrap();
+        sl.keystore2
+            .updateSubcomponent(&key_entry_response.metadata.key, Some(&cert_pem), None)
+            .expect("updateSubcomponent failed.");
 
-            grant_key_nspace
-        })
+        grant_key_nspace
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let grant_key_nspace = unsafe { run_as::run_as_root(grantor_fn) };
 
     // In grantee context load the key and try to perform crypto operation.
-    // SAFETY: The test is run in a separate process with no other threads.
-    unsafe {
-        run_as::run_as(
-            GRANTEE_CTX,
-            Uid::from_raw(GRANTEE_UID),
-            Gid::from_raw(GRANTEE_GID),
-            move || {
-                let keystore2 = get_keystore_service();
-                perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
-            },
-        )
+    let grantee_fn = move || {
+        let keystore2 = get_keystore_service();
+        perform_crypto_op_using_granted_key(&keystore2, grant_key_nspace);
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, grantee_fn) };
 }

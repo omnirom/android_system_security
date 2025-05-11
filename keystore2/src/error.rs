@@ -34,6 +34,7 @@ use android_system_keystore2::binder::{
     ExceptionCode, Result as BinderResult, Status as BinderStatus, StatusCode,
 };
 use keystore2_selinux as selinux;
+use postprocessor_client::Error as PostProcessorError;
 use rkpd_client::Error as RkpdError;
 use std::cmp::PartialEq;
 use std::ffi::CString;
@@ -99,6 +100,14 @@ impl From<RkpdError> for Error {
                 Error::Rc(ResponseCode::SYSTEM_ERROR)
             }
             RkpdError::BinderTransaction(s) => Error::BinderTransaction(s),
+        }
+    }
+}
+
+impl From<PostProcessorError> for Error {
+    fn from(e: PostProcessorError) -> Self {
+        match e {
+            PostProcessorError(s) => Error::BinderTransaction(s),
         }
     }
 }

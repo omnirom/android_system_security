@@ -23,7 +23,12 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
+
+// Parse a comma-delimited string.
+// Ignores any empty strings.
+std::unordered_set<std::string> parseCommaDelimited(const std::string& input);
 
 // Challenge size must be between 32 and 64 bytes inclusive.
 constexpr size_t kChallengeSize = 64;
@@ -35,9 +40,6 @@ template <typename T> struct CborResult {
     std::string errMsg;
 };
 
-// Return `buffer` encoded as a base64 string.
-std::string toBase64(const std::vector<uint8_t>& buffer);
-
 // Generate a random challenge containing `kChallengeSize` bytes.
 std::vector<uint8_t> generateChallenge();
 
@@ -47,13 +49,4 @@ std::vector<uint8_t> generateChallenge();
 CborResult<cppbor::Array>
 getCsr(std::string_view componentName,
        aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent* irpc,
-       bool selfTest, bool allowDegenerate);
-
-// Generates a test certificate chain and validates it, exiting the process on error.
-void selfTestGetCsr(
-    std::string_view componentName,
-    aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent* irpc);
-
-// Returns true if the given IRemotelyProvisionedComponent supports remote provisioning.
-bool isRemoteProvisioningSupported(
-    aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent* irpc);
+       bool selfTest, bool allowDegenerate, bool requireUdsCerts);

@@ -27,7 +27,10 @@ use crate::utils::{
 };
 use crate::{
     database::Uuid,
-    globals::{create_thread_local_db, DB, LEGACY_BLOB_LOADER, LEGACY_IMPORTER, SUPER_KEY},
+    globals::{
+        create_thread_local_db, DB, ENCODED_MODULE_INFO, LEGACY_BLOB_LOADER, LEGACY_IMPORTER,
+        SUPER_KEY,
+    },
 };
 use crate::{database::KEYSTORE_UUID, permission};
 use crate::{
@@ -39,6 +42,7 @@ use crate::{
     id_rotation::IdRotationState,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+use android_hardware_security_keymint::aidl::android::hardware::security::keymint::Tag::Tag;
 use android_hardware_security_keymint::binder::{BinderFeatures, Strong, ThreadState};
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, IKeystoreSecurityLevel::IKeystoreSecurityLevel,
@@ -314,6 +318,20 @@ impl KeystoreService {
         DB.with(|db| count_key_entries(&mut db.borrow_mut(), k.domain, k.nspace))
     }
 
+    fn get_supplementary_attestation_info(&self, tag: Tag) -> Result<Vec<u8>> {
+        match tag {
+            Tag::MODULE_HASH => {
+                let info = ENCODED_MODULE_INFO.read().unwrap();
+                (*info)
+                    .clone()
+                    .ok_or(Error::Rc(ResponseCode::INFO_NOT_AVAILABLE))
+                    .context(ks_err!("Module info not received."))
+            }
+            _ => Err(Error::Rc(ResponseCode::INVALID_ARGUMENT))
+                .context(ks_err!("Tag {tag:?} not supported for getSupplementaryAttestationInfo.")),
+        }
+    }
+
     fn list_entries_batched(
         &self,
         domain: Domain,
@@ -440,5 +458,15 @@ impl IKeystoreService for KeystoreService {
     fn getNumberOfEntries(&self, domain: Domain, namespace: i64) -> binder::Result<i32> {
         let _wp = wd::watch("IKeystoreService::getNumberOfEntries");
         self.count_num_entries(domain, namespace).map_err(into_logged_binder)
+    }
+
+    fn getSupplementaryAttestationInfo(&self, tag: Tag) -> binder::Result<Vec<u8>> {
+        if keystore2_flags::attest_modules() {
+            let _wp = wd::watch("IKeystoreService::getSupplementaryAttestationInfo");
+            self.get_supplementary_attestation_info(tag).map_err(into_logged_binder)
+        } else {
+            log::error!("attest_modules flag is not toggled");
+            Err(binder::StatusCode::UNKNOWN_TRANSACTION.into())
+        }
     }
 }

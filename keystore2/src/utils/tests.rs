@@ -53,9 +53,9 @@ fn test_safe_amount_to_return() -> Result<()> {
     let key_aliases = vec!["key1", "key2", "key3"];
     let key_descriptors = create_key_descriptors_from_aliases(&key_aliases);
 
-    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, &key_descriptors, 20), 1);
-    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, &key_descriptors, 50), 2);
-    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, &key_descriptors, 100), 3);
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 20), 1);
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 50), 2);
+    assert_eq!(estimate_safe_amount_to_return(Domain::APP, 1017, None, &key_descriptors, 100), 3);
     Ok(())
 }
 

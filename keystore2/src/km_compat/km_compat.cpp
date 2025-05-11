@@ -853,6 +853,11 @@ ScopedAStatus KeyMintDevice::sendRootOfTrust(const std::vector<uint8_t>& /* root
     return convertErrorCode(KMV1::ErrorCode::UNIMPLEMENTED);
 }
 
+ScopedAStatus KeyMintDevice::setAdditionalAttestationInfo(
+    const std::vector<KeyParameter>& /* additionalAttestationInfo */) {
+    return convertErrorCode(KMV1::ErrorCode::UNIMPLEMENTED);
+}
+
 ScopedAStatus KeyMintOperation::updateAad(const std::vector<uint8_t>& input,
                                           const std::optional<HardwareAuthToken>& optAuthToken,
                                           const std::optional<TimeStampToken>& optTimeStampToken) {

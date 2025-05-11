@@ -750,8 +750,12 @@ static V4_0::KeyParameter convertKeyParameterToLegacy(const KMV1::KeyParameter& 
     case KMV1::Tag::CERTIFICATE_SUBJECT:
     case KMV1::Tag::CERTIFICATE_NOT_BEFORE:
     case KMV1::Tag::CERTIFICATE_NOT_AFTER:
+        // These tags do not exist in KM < KeyMint 1.
+        break;
     case KMV1::Tag::ATTESTATION_ID_SECOND_IMEI:
-        // These tags do not exist in KM < KeyMint 1.0.
+        // This tag doesn't exist in KM < KeyMint 3.
+    case KMV1::Tag::MODULE_HASH:
+        // This tag doesn't exist in KM < KeyMint 4.
         break;
     case KMV1::Tag::MAX_BOOT_LEVEL:
         // Does not exist in API level 30 or below.

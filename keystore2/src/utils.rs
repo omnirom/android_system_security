@@ -80,6 +80,7 @@ pub fn check_keystore_permission(perm: KeystorePerm) -> anyhow::Result<()> {
 pub fn check_grant_permission(access_vec: KeyPermSet, key: &KeyDescriptor) -> anyhow::Result<()> {
     ThreadState::with_calling_sid(|calling_sid| {
         permission::check_grant_permission(
+            ThreadState::get_calling_uid(),
             calling_sid
                 .ok_or_else(Error::sys)
                 .context(ks_err!("Cannot check permission without calling_sid."))?,
@@ -540,39 +541,40 @@ fn merge_and_filter_key_entry_lists(
 pub(crate) fn estimate_safe_amount_to_return(
     domain: Domain,
     namespace: i64,
+    start_past_alias: Option<&str>,
     key_descriptors: &[KeyDescriptor],
     response_size_limit: usize,
 ) -> usize {
-    let mut items_to_return = 0;
-    let mut returned_bytes: usize = 0;
+    let mut count = 0;
+    let mut bytes: usize = 0;
     // Estimate the transaction size to avoid returning more items than what
     // could fit in a binder transaction.
     for kd in key_descriptors.iter() {
         // 4 bytes for the Domain enum
         // 8 bytes for the Namespace long.
-        returned_bytes += 4 + 8;
+        bytes += 4 + 8;
         // Size of the alias string. Includes 4 bytes for length encoding.
         if let Some(alias) = &kd.alias {
-            returned_bytes += 4 + alias.len();
+            bytes += 4 + alias.len();
         }
         // Size of the blob. Includes 4 bytes for length encoding.
         if let Some(blob) = &kd.blob {
-            returned_bytes += 4 + blob.len();
+            bytes += 4 + blob.len();
         }
         // The binder transaction size limit is 1M. Empirical measurements show
         // that the binder overhead is 60% (to be confirmed). So break after
         // 350KB and return a partial list.
-        if returned_bytes > response_size_limit {
+        if bytes > response_size_limit {
             log::warn!(
-                "{domain:?}:{namespace}: Key descriptors list ({} items) may exceed binder \
-                       size, returning {items_to_return} items est {returned_bytes} bytes.",
+                "{domain:?}:{namespace}: Key descriptors list ({} items after {start_past_alias:?}) \
+                 may exceed binder size, returning {count} items est. {bytes} bytes",
                 key_descriptors.len(),
             );
             break;
         }
-        items_to_return += 1;
+        count += 1;
     }
-    items_to_return
+    count
 }
 
 /// Estimate for maximum size of a Binder response in bytes.
@@ -601,8 +603,13 @@ pub fn list_key_entries(
         start_past_alias,
     );
 
-    let safe_amount_to_return =
-        estimate_safe_amount_to_return(domain, namespace, &merged_key_entries, RESPONSE_SIZE_LIMIT);
+    let safe_amount_to_return = estimate_safe_amount_to_return(
+        domain,
+        namespace,
+        start_past_alias,
+        &merged_key_entries,
+        RESPONSE_SIZE_LIMIT,
+    );
     Ok(merged_key_entries[..safe_amount_to_return].to_vec())
 }
 

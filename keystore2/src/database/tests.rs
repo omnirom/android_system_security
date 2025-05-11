@@ -2429,6 +2429,20 @@ fn blob_count(db: &mut KeystoreDB, sc_type: SubComponentType) -> usize {
     .unwrap()
 }
 
+fn blob_count_in_state(db: &mut KeystoreDB, sc_type: SubComponentType, state: BlobState) -> usize {
+    db.with_transaction(TransactionBehavior::Deferred, |tx| {
+        tx.query_row(
+            "SELECT COUNT(*) FROM persistent.blobentry
+                     WHERE subcomponent_type = ? AND state = ?;",
+            params![sc_type, state],
+            |row| row.get(0),
+        )
+        .context(ks_err!("Failed to count number of {sc_type:?} blobs"))
+        .no_gc()
+    })
+    .unwrap()
+}
+
 #[test]
 fn test_blobentry_gc() -> Result<()> {
     let mut db = new_test_db()?;
@@ -2439,6 +2453,9 @@ fn test_blobentry_gc() -> Result<()> {
     let key_id5 = make_test_key_entry(&mut db, Domain::APP, 5, "key5", None)?.0;
 
     assert_eq!(5, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(5, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
@@ -2447,6 +2464,9 @@ fn test_blobentry_gc() -> Result<()> {
     db.set_blob(&key_guard3, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
 
     assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(5, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
@@ -2459,6 +2479,9 @@ fn test_blobentry_gc() -> Result<()> {
     .unwrap();
 
     assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
@@ -2468,6 +2491,9 @@ fn test_blobentry_gc() -> Result<()> {
     let superseded_ids: Vec<i64> = superseded.iter().map(|v| v.blob_id).collect();
     assert_eq!(4, superseded.len());
     assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
@@ -2477,6 +2503,9 @@ fn test_blobentry_gc() -> Result<()> {
     let superseded_ids: Vec<i64> = superseded.iter().map(|v| v.blob_id).collect();
     assert_eq!(0, superseded.len());
     assert_eq!(3, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(3, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(3, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
@@ -2484,8 +2513,60 @@ fn test_blobentry_gc() -> Result<()> {
     let superseded = db.handle_next_superseded_blobs(&superseded_ids, 20).unwrap();
     assert_eq!(0, superseded.len());
     assert_eq!(3, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
     assert_eq!(3, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(3, blob_count(&mut db, SubComponentType::CERT_CHAIN));
+
+    Ok(())
+}
+
+#[test]
+fn test_upgrade_1_to_2() -> Result<()> {
+    let mut db = new_test_db()?;
+    let _key_id1 = make_test_key_entry(&mut db, Domain::APP, 1, "key1", None)?.0;
+    let key_guard2 = make_test_key_entry(&mut db, Domain::APP, 2, "key2", None)?;
+    let key_guard3 = make_test_key_entry(&mut db, Domain::APP, 3, "key3", None)?;
+    let key_id4 = make_test_key_entry(&mut db, Domain::APP, 4, "key4", None)?.0;
+    let key_id5 = make_test_key_entry(&mut db, Domain::APP, 5, "key5", None)?.0;
+
+    // Replace the keyblobs for keys 2 and 3.  The previous blobs will still exist.
+    db.set_blob(&key_guard2, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
+    db.set_blob(&key_guard3, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
+
+    // Delete keys 4 and 5.  The keyblobs aren't removed yet.
+    db.with_transaction(Immediate("TX_delete_test_keys"), |tx| {
+        KeystoreDB::mark_unreferenced(tx, key_id4)?;
+        KeystoreDB::mark_unreferenced(tx, key_id5)?;
+        Ok(()).no_gc()
+    })
+    .unwrap();
+    assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
+
+    // Manually downgrade the database to the v1 schema.
+    db.with_transaction(Immediate("TX_downgrade_2_to_1"), |tx| {
+        tx.execute("DROP INDEX persistent.keyentry_state_index;", params!())?;
+        tx.execute("DROP INDEX persistent.blobentry_state_index;", params!())?;
+        tx.execute("ALTER TABLE persistent.blobentry DROP COLUMN state;", params!())?;
+        Ok(()).no_gc()
+    })?;
+
+    // Run the upgrade process.
+    let version = db.with_transaction(Immediate("TX_upgrade_1_to_2"), |tx| {
+        KeystoreDB::from_1_to_2(tx).no_gc()
+    })?;
+    assert_eq!(version, 2);
+
+    // Check blobs have acquired the right `state` values.
+    assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
+    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
+    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
     Ok(())
 }
@@ -2652,6 +2733,16 @@ fn run_with_many_keys<F, T>(max_count: usize, test_fn: F) -> Result<()>
 where
     F: Fn(&mut KeystoreDB) -> T,
 {
+    prep_and_run_with_many_keys(max_count, |_db| (), test_fn)
+}
+
+/// Run the provided `test_fn` against the database at various increasing stages of
+/// database population.
+fn prep_and_run_with_many_keys<F, T, P>(max_count: usize, prep_fn: P, test_fn: F) -> Result<()>
+where
+    F: Fn(&mut KeystoreDB) -> T,
+    P: Fn(&mut KeystoreDB),
+{
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("keystore2_test")
@@ -2670,6 +2761,10 @@ where
         db_populate_keys(&mut db, next_keyid, key_count);
         assert_eq!(db_key_count(&mut db), key_count);
 
+        // Perform any test-specific preparation
+        prep_fn(&mut db);
+
+        // Time execution of the test function.
         let start = std::time::Instant::now();
         let _result = test_fn(&mut db);
         println!("{key_count}, {}", start.elapsed().as_secs_f64());
@@ -2737,6 +2832,7 @@ fn test_list_keys_with_many_keys() -> Result<()> {
             let batch_size = crate::utils::estimate_safe_amount_to_return(
                 domain,
                 namespace,
+                None,
                 &keys,
                 crate::utils::RESPONSE_SIZE_LIMIT,
             );
@@ -2752,4 +2848,28 @@ fn test_list_keys_with_many_keys() -> Result<()> {
             batches += 1;
         }
     })
+}
+
+#[test]
+fn test_upgrade_1_to_2_with_many_keys() -> Result<()> {
+    prep_and_run_with_many_keys(
+        1_000_000,
+        |db: &mut KeystoreDB| {
+            // Manually downgrade the database to the v1 schema.
+            db.with_transaction(Immediate("TX_downgrade_2_to_1"), |tx| {
+                tx.execute("DROP INDEX persistent.keyentry_state_index;", params!())?;
+                tx.execute("DROP INDEX persistent.blobentry_state_index;", params!())?;
+                tx.execute("ALTER TABLE persistent.blobentry DROP COLUMN state;", params!())?;
+                Ok(()).no_gc()
+            })
+            .unwrap();
+        },
+        |db: &mut KeystoreDB| -> Result<()> {
+            // Run the upgrade process.
+            db.with_transaction(Immediate("TX_upgrade_1_to_2"), |tx| {
+                KeystoreDB::from_1_to_2(tx).no_gc()
+            })?;
+            Ok(())
+        },
+    )
 }

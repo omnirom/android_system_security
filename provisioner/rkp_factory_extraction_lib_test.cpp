@@ -25,6 +25,7 @@
 #include <android-base/properties.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <openssl/base64.h>
 
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,30 @@ std::ostream& operator<<(std::ostream& os, const Item* item) {
 
 }  // namespace cppbor
 
+std::string toBase64(const std::vector<uint8_t>& buffer) {
+    size_t base64Length;
+    int rc = EVP_EncodedLength(&base64Length, buffer.size());
+    if (!rc) {
+        std::cerr << "Error getting base64 length. Size overflow?" << std::endl;
+        exit(-1);
+    }
+
+    std::string base64(base64Length, ' ');
+    rc = EVP_EncodeBlock(reinterpret_cast<uint8_t*>(base64.data()), buffer.data(), buffer.size());
+    ++rc;  // Account for NUL, which BoringSSL does not for some reason.
+    if (rc != base64Length) {
+        std::cerr << "Error writing base64. Expected " << base64Length
+                  << " bytes to be written, but " << rc << " bytes were actually written."
+                  << std::endl;
+        exit(-1);
+    }
+
+    // BoringSSL automatically adds a NUL -- remove it from the string data
+    base64.pop_back();
+
+    return base64;
+}
+
 class MockIRemotelyProvisionedComponent : public IRemotelyProvisionedComponentDefault {
   public:
     MOCK_METHOD(ScopedAStatus, getHardwareInfo, (RpcHardwareInfo * _aidl_return), (override));
@@ -77,7 +102,7 @@ class MockIRemotelyProvisionedComponent : public IRemotelyProvisionedComponentDe
                 (const std::vector<MacedPublicKey>& in_keysToSign,
                  const std::vector<uint8_t>& in_challenge, std::vector<uint8_t>* _aidl_return),
                 (override));
-    MOCK_METHOD(ScopedAStatus, getInterfaceVersion, (int32_t * _aidl_return), (override));
+    MOCK_METHOD(ScopedAStatus, getInterfaceVersion, (int32_t* _aidl_return), (override));
     MOCK_METHOD(ScopedAStatus, getInterfaceHash, (std::string * _aidl_return), (override));
 };
 
@@ -87,7 +112,7 @@ TEST(LibRkpFactoryExtractionTests, ToBase64) {
         input[i] = i;
     }
 
-    // Test three lengths so we get all the different paddding options
+    // Test three lengths so we get all the different padding options
     EXPECT_EQ("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4"
               "vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV"
               "5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMj"
@@ -180,8 +205,9 @@ TEST(LibRkpFactoryExtractionTests, GetCsrWithV2Hal) {
                         SetArgPointee<6>(kFakeMac),             //
                         Return(ByMove(ScopedAStatus::ok()))));  //
 
-    auto [csr, csrErrMsg] = getCsr("mock component name", mockRpc.get(),
-                                   /*selfTest=*/false, /*allowDegenerate=*/true);
+    auto [csr, csrErrMsg] =
+        getCsr("mock component name", mockRpc.get(),
+               /*selfTest=*/false, /*allowDegenerate=*/true, /*requireUdsCerts=*/false);
     ASSERT_THAT(csr, NotNull()) << csrErrMsg;
     ASSERT_THAT(csr->asArray(), Pointee(Property(&Array::size, Eq(4))));
 
@@ -230,7 +256,7 @@ TEST(LibRkpFactoryExtractionTests, GetCsrWithV2Hal) {
 
 TEST(LibRkpFactoryExtractionTests, GetCsrWithV3Hal) {
     const std::vector<uint8_t> kCsr = Array()
-                                          .add(3 /* version */)
+                                          .add(1 /* version */)
                                           .add(Map() /* UdsCerts */)
                                           .add(Array() /* DiceCertChain */)
                                           .add(Array() /* SignedData */)
@@ -250,12 +276,13 @@ TEST(LibRkpFactoryExtractionTests, GetCsrWithV3Hal) {
         .WillOnce(DoAll(SaveArg<1>(&challenge), SetArgPointee<2>(kCsr),
                         Return(ByMove(ScopedAStatus::ok()))));
 
-    auto [csr, csrErrMsg] = getCsr("mock component name", mockRpc.get(),
-                                   /*selfTest=*/false, /*allowDegenerate=*/true);
+    auto [csr, csrErrMsg] =
+        getCsr("mock component name", mockRpc.get(),
+               /*selfTest=*/false, /*allowDegenerate=*/true, /*requireUdsCerts=*/false);
     ASSERT_THAT(csr, NotNull()) << csrErrMsg;
     ASSERT_THAT(csr, Pointee(Property(&Array::size, Eq(5))));
 
-    EXPECT_THAT(csr->get(0 /* version */), Pointee(Eq(Uint(3))));
+    EXPECT_THAT(csr->get(0 /* version */), Pointee(Eq(Uint(1))));
     EXPECT_THAT(csr->get(1)->asMap(), NotNull());
     EXPECT_THAT(csr->get(2)->asArray(), NotNull());
     EXPECT_THAT(csr->get(3)->asArray(), NotNull());
@@ -265,4 +292,74 @@ TEST(LibRkpFactoryExtractionTests, GetCsrWithV3Hal) {
     EXPECT_THAT(unverifedDeviceInfo->get("fingerprint"), NotNull());
     const Tstr fingerprint(android::base::GetProperty("ro.build.fingerprint", ""));
     EXPECT_THAT(*unverifedDeviceInfo->get("fingerprint")->asTstr(), Eq(fingerprint));
+}
+
+TEST(LibRkpFactoryExtractionTests, requireUdsCerts) {
+    const std::vector<uint8_t> kCsr = Array()
+                                          .add(1 /* version */)
+                                          .add(Map() /* UdsCerts */)
+                                          .add(Array() /* DiceCertChain */)
+                                          .add(Array() /* SignedData */)
+                                          .encode();
+    std::vector<uint8_t> challenge;
+
+    // Set up mock, then call getCsr
+    auto mockRpc = SharedRefBase::make<MockIRemotelyProvisionedComponent>();
+    EXPECT_CALL(*mockRpc, getHardwareInfo(NotNull())).WillRepeatedly([](RpcHardwareInfo* hwInfo) {
+        hwInfo->versionNumber = 3;
+        return ScopedAStatus::ok();
+    });
+    EXPECT_CALL(*mockRpc,
+                generateCertificateRequestV2(IsEmpty(),   // keysToSign
+                                             _,           // challenge
+                                             NotNull()))  // _aidl_return
+        .WillOnce(DoAll(SaveArg<1>(&challenge), SetArgPointee<2>(kCsr),
+                        Return(ByMove(ScopedAStatus::ok()))));
+
+    auto [csr, csrErrMsg] =
+        getCsr("mock component name", mockRpc.get(),
+               /*selfTest=*/true, /*allowDegenerate=*/false, /*requireUdsCerts=*/true);
+    ASSERT_EQ(csr, nullptr);
+    ASSERT_THAT(csrErrMsg, testing::HasSubstr("UdsCerts must not be empty"));
+}
+
+TEST(LibRkpFactoryExtractionTests, dontRequireUdsCerts) {
+    const std::vector<uint8_t> kCsr = Array()
+                                          .add(1 /* version */)
+                                          .add(Map() /* UdsCerts */)
+                                          .add(Array() /* DiceCertChain */)
+                                          .add(Array() /* SignedData */)
+                                          .encode();
+    std::vector<uint8_t> challenge;
+
+    // Set up mock, then call getCsr
+    auto mockRpc = SharedRefBase::make<MockIRemotelyProvisionedComponent>();
+    EXPECT_CALL(*mockRpc, getHardwareInfo(NotNull())).WillRepeatedly([](RpcHardwareInfo* hwInfo) {
+        hwInfo->versionNumber = 3;
+        return ScopedAStatus::ok();
+    });
+    EXPECT_CALL(*mockRpc,
+                generateCertificateRequestV2(IsEmpty(),   // keysToSign
+                                             _,           // challenge
+                                             NotNull()))  // _aidl_return
+        .WillOnce(DoAll(SaveArg<1>(&challenge), SetArgPointee<2>(kCsr),
+                        Return(ByMove(ScopedAStatus::ok()))));
+
+    auto [csr, csrErrMsg] =
+        getCsr("mock component name", mockRpc.get(),
+               /*selfTest=*/true, /*allowDegenerate=*/false, /*requireUdsCerts=*/false);
+    ASSERT_EQ(csr, nullptr);
+    ASSERT_THAT(csrErrMsg, testing::Not(testing::HasSubstr("UdsCerts must not be empty")));
+}
+
+TEST(LibRkpFactoryExtractionTests, parseCommaDelimitedString) {
+    const auto& rpcNames = "default,avf,,default,Strongbox,strongbox,,";
+    const auto& rpcSet = parseCommaDelimited(rpcNames);
+
+    ASSERT_EQ(rpcSet.size(), 4);
+    ASSERT_TRUE(rpcSet.count("") == 0);
+    ASSERT_TRUE(rpcSet.count("default") == 1);
+    ASSERT_TRUE(rpcSet.count("avf") == 1);
+    ASSERT_TRUE(rpcSet.count("strongbox") == 1);
+    ASSERT_TRUE(rpcSet.count("Strongbox") == 1);
 }

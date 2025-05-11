@@ -25,7 +25,6 @@
 #include <cstring>
 #include <iterator>
 #include <keymaster/cppcose/cppcose.h>
-#include <openssl/base64.h>
 #include <remote_prov/remote_prov_utils.h>
 #include <sys/random.h>
 
@@ -33,6 +32,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "cppbor_parse.h"
@@ -42,6 +42,7 @@ using aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent;
 using aidl::android::hardware::security::keymint::MacedPublicKey;
 using aidl::android::hardware::security::keymint::ProtectedData;
 using aidl::android::hardware::security::keymint::RpcHardwareInfo;
+using aidl::android::hardware::security::keymint::remote_prov::BccEntryData;
 using aidl::android::hardware::security::keymint::remote_prov::EekChain;
 using aidl::android::hardware::security::keymint::remote_prov::generateEekChain;
 using aidl::android::hardware::security::keymint::remote_prov::getProdEekChain;
@@ -50,34 +51,12 @@ using aidl::android::hardware::security::keymint::remote_prov::parseAndValidateF
 using aidl::android::hardware::security::keymint::remote_prov::verifyFactoryCsr;
 using aidl::android::hardware::security::keymint::remote_prov::verifyFactoryProtectedData;
 
-using namespace cppbor;
-using namespace cppcose;
+using cppbor::Array;
+using cppbor::Map;
+using cppbor::Null;
+template <class T> using ErrMsgOr = cppcose::ErrMsgOr<T>;
 
 constexpr size_t kVersionWithoutSuperencryption = 3;
-
-std::string toBase64(const std::vector<uint8_t>& buffer) {
-    size_t base64Length;
-    int rc = EVP_EncodedLength(&base64Length, buffer.size());
-    if (!rc) {
-        std::cerr << "Error getting base64 length. Size overflow?" << std::endl;
-        exit(-1);
-    }
-
-    std::string base64(base64Length, ' ');
-    rc = EVP_EncodeBlock(reinterpret_cast<uint8_t*>(base64.data()), buffer.data(), buffer.size());
-    ++rc;  // Account for NUL, which BoringSSL does not for some reason.
-    if (rc != base64Length) {
-        std::cerr << "Error writing base64. Expected " << base64Length
-                  << " bytes to be written, but " << rc << " bytes were actually written."
-                  << std::endl;
-        exit(-1);
-    }
-
-    // BoringSSL automatically adds a NUL -- remove it from the string data
-    base64.pop_back();
-
-    return base64;
-}
 
 std::vector<uint8_t> generateChallenge() {
     std::vector<uint8_t> challenge(kChallengeSize);
@@ -90,7 +69,8 @@ std::vector<uint8_t> generateChallenge() {
             if (errno == EINTR) {
                 continue;
             } else {
-                std::cerr << errno << ": " << strerror(errno) << std::endl;
+                std::cerr << "generateChallenge: getrandom returned an error with errno " << errno
+                          << ": " << strerror(errno) << ". Exiting..." << std::endl;
                 exit(-1);
             }
         }
@@ -105,7 +85,7 @@ CborResult<Array> composeCertificateRequestV1(const ProtectedData& protectedData
                                               const DeviceInfo& verifiedDeviceInfo,
                                               const std::vector<uint8_t>& challenge,
                                               const std::vector<uint8_t>& keysToSignMac,
-                                              IRemotelyProvisionedComponent* provisionable) {
+                                              const RpcHardwareInfo& rpcHardwareInfo) {
     Array macedKeysToSign = Array()
                                 .add(Map().add(1, 5).encode())  // alg: hmac-sha256
                                 .add(Map())                     // empty unprotected headers
@@ -113,12 +93,12 @@ CborResult<Array> composeCertificateRequestV1(const ProtectedData& protectedData
                                 .add(keysToSignMac);            // MAC as returned from the HAL
 
     ErrMsgOr<std::unique_ptr<Map>> parsedVerifiedDeviceInfo =
-        parseAndValidateFactoryDeviceInfo(verifiedDeviceInfo.deviceInfo, provisionable);
+        parseAndValidateFactoryDeviceInfo(verifiedDeviceInfo.deviceInfo, rpcHardwareInfo);
     if (!parsedVerifiedDeviceInfo) {
         return {nullptr, parsedVerifiedDeviceInfo.moveMessage()};
     }
 
-    auto [parsedProtectedData, ignore2, errMsg] = parse(protectedData.protectedData);
+    auto [parsedProtectedData, ignore2, errMsg] = cppbor::parse(protectedData.protectedData);
     if (!parsedProtectedData) {
         std::cerr << "Error parsing protected data: '" << errMsg << "'" << std::endl;
         return {nullptr, errMsg};
@@ -145,7 +125,7 @@ CborResult<Array> getCsrV1(std::string_view componentName, IRemotelyProvisionedC
     if (!status.isOk()) {
         std::cerr << "Failed to get hardware info for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return {nullptr, status.getDescription()};
     }
 
     const std::vector<uint8_t> eek = getProdEekChain(hwInfo.supportedEekCurve);
@@ -156,13 +136,14 @@ CborResult<Array> getCsrV1(std::string_view componentName, IRemotelyProvisionedC
     if (!status.isOk()) {
         std::cerr << "Bundle extraction failed for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return {nullptr, status.getDescription()};
     }
     return composeCertificateRequestV1(protectedData, verifiedDeviceInfo, challenge, keysToSignMac,
-                                       irpc);
+                                       hwInfo);
 }
 
-void selfTestGetCsrV1(std::string_view componentName, IRemotelyProvisionedComponent* irpc) {
+std::optional<std::string> selfTestGetCsrV1(std::string_view componentName,
+                                            IRemotelyProvisionedComponent* irpc) {
     std::vector<uint8_t> keysToSignMac;
     std::vector<MacedPublicKey> emptyKeys;
     DeviceInfo verifiedDeviceInfo;
@@ -172,14 +153,14 @@ void selfTestGetCsrV1(std::string_view componentName, IRemotelyProvisionedCompon
     if (!status.isOk()) {
         std::cerr << "Failed to get hardware info for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return status.getDescription();
     }
 
     const std::vector<uint8_t> eekId = {0, 1, 2, 3, 4, 5, 6, 7};
     ErrMsgOr<EekChain> eekChain = generateEekChain(hwInfo.supportedEekCurve, /*length=*/3, eekId);
     if (!eekChain) {
         std::cerr << "Error generating test EEK certificate chain: " << eekChain.message();
-        exit(-1);
+        return eekChain.message();
     }
     const std::vector<uint8_t> challenge = generateChallenge();
     status = irpc->generateCertificateRequest(
@@ -188,18 +169,19 @@ void selfTestGetCsrV1(std::string_view componentName, IRemotelyProvisionedCompon
     if (!status.isOk()) {
         std::cerr << "Error generating test cert chain for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return status.getDescription();
     }
 
     auto result = verifyFactoryProtectedData(verifiedDeviceInfo, /*keysToSign=*/{}, keysToSignMac,
-                                             protectedData, *eekChain, eekId,
-                                             hwInfo.supportedEekCurve, irpc, challenge);
+                                             protectedData, *eekChain, eekId, hwInfo,
+                                             std::string(componentName), challenge);
 
     if (!result) {
         std::cerr << "Self test failed for IRemotelyProvisionedComponent '" << componentName
                   << "'. Error message: '" << result.message() << "'." << std::endl;
-        exit(-1);
+        return result.message();
     }
+    return std::nullopt;
 }
 
 CborResult<Array> composeCertificateRequestV3(const std::vector<uint8_t>& csr) {
@@ -223,27 +205,35 @@ CborResult<Array> composeCertificateRequestV3(const std::vector<uint8_t>& csr) {
     return {std::unique_ptr<Array>(parsedCsr.release()->asArray()), ""};
 }
 
-CborResult<cppbor::Array> getCsrV3(std::string_view componentName,
-                                   IRemotelyProvisionedComponent* irpc, bool selfTest,
-                                   bool allowDegenerate) {
+CborResult<Array> getCsrV3(std::string_view componentName, IRemotelyProvisionedComponent* irpc,
+                           bool selfTest, bool allowDegenerate, bool requireUdsCerts) {
     std::vector<uint8_t> csr;
     std::vector<MacedPublicKey> emptyKeys;
     const std::vector<uint8_t> challenge = generateChallenge();
 
-    auto status = irpc->generateCertificateRequestV2(emptyKeys, challenge, &csr);
+    RpcHardwareInfo hwInfo;
+    auto status = irpc->getHardwareInfo(&hwInfo);
+    if (!status.isOk()) {
+        std::cerr << "Failed to get hardware info for '" << componentName
+                  << "'. Description: " << status.getDescription() << "." << std::endl;
+        return {nullptr, status.getDescription()};
+    }
+
+    status = irpc->generateCertificateRequestV2(emptyKeys, challenge, &csr);
     if (!status.isOk()) {
         std::cerr << "Bundle extraction failed for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return {nullptr, status.getDescription()};
     }
 
     if (selfTest) {
-        auto result =
-            verifyFactoryCsr(/*keysToSign=*/cppbor::Array(), csr, irpc, challenge, allowDegenerate);
+        auto result = verifyFactoryCsr(/*keysToSign=*/cppbor::Array(), csr, hwInfo,
+                                       std::string(componentName), challenge, allowDegenerate,
+                                       requireUdsCerts);
         if (!result) {
             std::cerr << "Self test failed for IRemotelyProvisionedComponent '" << componentName
                       << "'. Error message: '" << result.message() << "'." << std::endl;
-            exit(-1);
+            return {nullptr, result.message()};
         }
     }
 
@@ -251,35 +241,37 @@ CborResult<cppbor::Array> getCsrV3(std::string_view componentName,
 }
 
 CborResult<Array> getCsr(std::string_view componentName, IRemotelyProvisionedComponent* irpc,
-                         bool selfTest, bool allowDegenerate) {
+                         bool selfTest, bool allowDegenerate, bool requireUdsCerts) {
     RpcHardwareInfo hwInfo;
     auto status = irpc->getHardwareInfo(&hwInfo);
     if (!status.isOk()) {
         std::cerr << "Failed to get hardware info for '" << componentName
                   << "'. Description: " << status.getDescription() << "." << std::endl;
-        exit(-1);
+        return {nullptr, status.getDescription()};
     }
 
     if (hwInfo.versionNumber < kVersionWithoutSuperencryption) {
         if (selfTest) {
-            selfTestGetCsrV1(componentName, irpc);
+            auto errMsg = selfTestGetCsrV1(componentName, irpc);
+            if (errMsg) {
+                return {nullptr, *errMsg};
+            }
         }
         return getCsrV1(componentName, irpc);
     } else {
-        return getCsrV3(componentName, irpc, selfTest, allowDegenerate);
+        return getCsrV3(componentName, irpc, selfTest, allowDegenerate, requireUdsCerts);
     }
 }
 
-bool isRemoteProvisioningSupported(IRemotelyProvisionedComponent* irpc) {
-    RpcHardwareInfo hwInfo;
-    auto status = irpc->getHardwareInfo(&hwInfo);
-    if (status.isOk()) {
-        return true;
+std::unordered_set<std::string> parseCommaDelimited(const std::string& input) {
+    std::stringstream ss(input);
+    std::unordered_set<std::string> result;
+    while (ss.good()) {
+        std::string name;
+        std::getline(ss, name, ',');
+        if (!name.empty()) {
+            result.insert(name);
+        }
     }
-    if (status.getExceptionCode() == EX_UNSUPPORTED_OPERATION) {
-        return false;
-    }
-    std::cerr << "Unexpected error when getting hardware info. Description: "
-              << status.getDescription() << "." << std::endl;
-    exit(-1);
+    return result;
 }

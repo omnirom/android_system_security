@@ -20,9 +20,8 @@
 //! DB.
 
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    Algorithm::Algorithm, AttestationKey::AttestationKey, Certificate::Certificate,
-    KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel,
-    Tag::Tag,
+    Algorithm::Algorithm, AttestationKey::AttestationKey, KeyParameter::KeyParameter,
+    KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
 };
 use android_security_rkp_aidl::aidl::android::security::rkp::RemotelyProvisionedKey::RemotelyProvisionedKey;
 use android_system_keystore2::aidl::android::system::keystore2::{
@@ -85,7 +84,7 @@ impl RemProvState {
         key: &KeyDescriptor,
         caller_uid: u32,
         params: &[KeyParameter],
-    ) -> Result<Option<(AttestationKey, Certificate)>> {
+    ) -> Result<Option<(AttestationKey, Vec<u8>)>> {
         if !self.is_asymmetric_key(params) || key.domain != Domain::APP {
             Ok(None)
         } else {
@@ -106,13 +105,14 @@ impl RemProvState {
                     AttestationKey {
                         keyBlob: rkpd_key.keyBlob,
                         attestKeyParams: vec![],
-                        // Batch certificate is at the beginning of the certificate chain.
+                        // Batch certificate is at the beginning of the concatenated certificate
+                        // chain, and the helper function only looks at the first cert.
                         issuerSubjectName: parse_subject_from_certificate(
                             &rkpd_key.encodedCertChain,
                         )
                         .context(ks_err!("Failed to parse subject."))?,
                     },
-                    Certificate { encodedCertificate: rkpd_key.encodedCertChain },
+                    rkpd_key.encodedCertChain,
                 ))),
             }
         }

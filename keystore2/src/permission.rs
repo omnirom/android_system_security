@@ -282,12 +282,19 @@ pub fn check_keystore_permission(caller_ctx: &CStr, perm: KeystorePerm) -> anyho
 ///                      SELinux keystore key backend, and the result is used
 ///                      as target context.
 pub fn check_grant_permission(
+    caller_uid: u32,
     caller_ctx: &CStr,
     access_vec: KeyPermSet,
     key: &KeyDescriptor,
 ) -> anyhow::Result<()> {
     let target_context = match key.domain {
-        Domain::APP => getcon().context("check_grant_permission: getcon failed.")?,
+        Domain::APP => {
+            if caller_uid as i64 != key.nspace {
+                return Err(selinux::Error::perm())
+                    .context("Trying to access key without ownership.");
+            }
+            getcon().context("check_grant_permission: getcon failed.")?
+        }
         Domain::SELINUX => lookup_keystore2_key_context(key.nspace)
             .context("check_grant_permission: Domain::SELINUX: Failed to lookup namespace.")?,
         _ => return Err(KsError::sys()).context(format!("Cannot grant {:?}.", key.domain)),

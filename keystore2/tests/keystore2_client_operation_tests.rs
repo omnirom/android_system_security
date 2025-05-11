@@ -40,7 +40,8 @@ use std::thread::JoinHandle;
 ///
 /// # Safety
 ///
-/// Must be called from a process with no other threads.
+/// Must only be called from a single-threaded process (e.g. as enforced by `AndroidTest.xml`
+/// setting `--test-threads=1`).
 pub unsafe fn create_operations(
     target_ctx: &'static str,
     forced_op: ForcedOp,
@@ -50,7 +51,7 @@ pub unsafe fn create_operations(
     let base_gid = 99 * AID_USER_OFFSET + 10001;
     let base_uid = 99 * AID_USER_OFFSET + 10001;
     (0..max_ops)
-        // SAFETY: The caller guarantees that there are no other threads.
+        // Safety: The caller guarantees that there are no other threads.
         .map(|i| unsafe {
             execute_op_run_as_child(
                 target_ctx,
@@ -93,7 +94,8 @@ fn keystore2_backend_busy_test() {
     const MAX_OPS: i32 = 100;
     static TARGET_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
 
-    // SAFETY: The test is run in a separate process with no other threads.
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     let mut child_handles = unsafe { create_operations(TARGET_CTX, ForcedOp(false), MAX_OPS) };
 
     // Wait until all child procs notifies us to continue,
@@ -127,7 +129,8 @@ fn keystore2_forced_op_after_backendbusy_test() {
     static TARGET_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
 
     // Create regular operations.
-    // SAFETY: The test is run in a separate process with no other threads.
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     let mut child_handles = unsafe { create_operations(TARGET_CTX, ForcedOp(false), MAX_OPS) };
 
     // Wait until all child procs notifies us to continue, so that there are enough
@@ -139,28 +142,31 @@ fn keystore2_forced_op_after_backendbusy_test() {
     // Create a forced operation.
     let auid = 99 * AID_USER_OFFSET + 10604;
     let agid = 99 * AID_USER_OFFSET + 10604;
-    // SAFETY: The test is run in a separate process with no other threads.
+    let force_op_fn = move || {
+        let alias = format!("ks_prune_forced_op_key_{}", getuid());
+
+        // To make room for this forced op, system should be able to prune one of the
+        // above created regular operations and create a slot for this forced operation
+        // successfully.
+        create_signing_operation(
+            ForcedOp(true),
+            KeyPurpose::SIGN,
+            Digest::SHA_2_256,
+            Domain::SELINUX,
+            100,
+            Some(alias),
+        )
+        .expect("Client failed to create forced operation after BACKEND_BUSY state.");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     unsafe {
         run_as::run_as(
             key_generations::TARGET_VOLD_CTX,
             Uid::from_raw(auid),
             Gid::from_raw(agid),
-            move || {
-                let alias = format!("ks_prune_forced_op_key_{}", getuid());
-
-                // To make room for this forced op, system should be able to prune one of the
-                // above created regular operations and create a slot for this forced operation
-                // successfully.
-                create_signing_operation(
-                    ForcedOp(true),
-                    KeyPurpose::SIGN,
-                    Digest::SHA_2_256,
-                    Domain::SELINUX,
-                    100,
-                    Some(alias),
-                )
-                .expect("Client failed to create forced operation after BACKEND_BUSY state.");
-            },
+            force_op_fn,
         );
     };
 
@@ -212,7 +218,9 @@ fn keystore2_max_forced_ops_test() {
     // Create initial forced operation in a child process
     // and wait for the parent to notify to perform operation.
     let alias = format!("ks_forced_op_key_{}", getuid());
-    // SAFETY: The test is run in a separate process with no other threads.
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     let mut first_op_handle = unsafe {
         execute_op_run_as_child(
             key_generations::TARGET_SU_CTX,
@@ -231,7 +239,8 @@ fn keystore2_max_forced_ops_test() {
 
     // Create MAX_OPS number of forced operations.
     let mut child_handles =
-    // SAFETY: The test is run in a separate process with no other threads.
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
         unsafe { create_operations(key_generations::TARGET_SU_CTX, ForcedOp(true), MAX_OPS) };
 
     // Wait until all child procs notifies us to continue, so that  there are enough operations
@@ -295,7 +304,9 @@ fn keystore2_ops_prune_test() {
     // Create an operation in an untrusted_app context. Wait until the parent notifies to continue.
     // Once the parent notifies, this operation is expected to be completed successfully.
     let alias = format!("ks_reg_op_key_{}", getuid());
-    // SAFETY: The test is run in a separate process with no other threads.
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     let mut child_handle = unsafe {
         execute_op_run_as_child(
             TARGET_CTX,
@@ -393,21 +404,24 @@ fn keystore2_forced_op_perm_denied_test() {
     let gid = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
 
     for context in TARGET_CTXS.iter() {
-        // SAFETY: The test is run in a separate process with no other threads.
+        let forced_op_fn = move || {
+            let alias = format!("ks_app_forced_op_test_key_{}", getuid());
+            let result = key_generations::map_ks_error(create_signing_operation(
+                ForcedOp(true),
+                KeyPurpose::SIGN,
+                Digest::SHA_2_256,
+                Domain::APP,
+                -1,
+                Some(alias),
+            ));
+            assert!(result.is_err());
+            assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
+        };
+
+        // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+        // `--test-threads=1`), and nothing yet done with binder.
         unsafe {
-            run_as::run_as(context, Uid::from_raw(uid), Gid::from_raw(gid), move || {
-                let alias = format!("ks_app_forced_op_test_key_{}", getuid());
-                let result = key_generations::map_ks_error(create_signing_operation(
-                    ForcedOp(true),
-                    KeyPurpose::SIGN,
-                    Digest::SHA_2_256,
-                    Domain::APP,
-                    -1,
-                    Some(alias),
-                ));
-                assert!(result.is_err());
-                assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
-            });
+            run_as::run_as(context, Uid::from_raw(uid), Gid::from_raw(gid), forced_op_fn);
         }
     }
 }
@@ -416,27 +430,29 @@ fn keystore2_forced_op_perm_denied_test() {
 /// Should be able to create forced operation with `vold` context successfully.
 #[test]
 fn keystore2_forced_op_success_test() {
-    static TARGET_CTX: &str = "u:r:vold:s0";
+    static TARGET_VOLD_CTX: &str = "u:r:vold:s0";
     const USER_ID: u32 = 99;
     const APPLICATION_ID: u32 = 10601;
 
     let uid = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
     let gid = USER_ID * AID_USER_OFFSET + APPLICATION_ID;
+    let forced_op_fn = move || {
+        let alias = format!("ks_vold_forced_op_key_{}", getuid());
+        create_signing_operation(
+            ForcedOp(true),
+            KeyPurpose::SIGN,
+            Digest::SHA_2_256,
+            Domain::SELINUX,
+            key_generations::SELINUX_VOLD_NAMESPACE,
+            Some(alias),
+        )
+        .expect("Client with vold context failed to create forced operation.");
+    };
 
-    // SAFETY: The test is run in a separate process with no other threads.
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
     unsafe {
-        run_as::run_as(TARGET_CTX, Uid::from_raw(uid), Gid::from_raw(gid), move || {
-            let alias = format!("ks_vold_forced_op_key_{}", getuid());
-            create_signing_operation(
-                ForcedOp(true),
-                KeyPurpose::SIGN,
-                Digest::SHA_2_256,
-                Domain::SELINUX,
-                key_generations::SELINUX_VOLD_NAMESPACE,
-                Some(alias),
-            )
-            .expect("Client with vold context failed to create forced operation.");
-        });
+        run_as::run_as(TARGET_VOLD_CTX, Uid::from_raw(uid), Gid::from_raw(gid), forced_op_fn);
     }
 }
 

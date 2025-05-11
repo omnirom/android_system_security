@@ -392,6 +392,30 @@ pub fn map_ks_error<T>(r: BinderResult<T>) -> Result<T, Error> {
     })
 }
 
+/// Check for a specific KeyMint error.
+#[macro_export]
+macro_rules! expect_km_error {
+    { $result:expr, $want:expr } => {
+        match $result {
+            Ok(_) => return Err(format!(
+                "{}:{}: Expected KeyMint error {:?}, found success",
+                file!(),
+                line!(),
+                $want
+            ).into()),
+            Err(s) if s.exception_code() == ExceptionCode::SERVICE_SPECIFIC
+                    && s.service_specific_error() == $want.0 => {}
+            Err(e) => return Err(format!(
+                "{}:{}: Expected KeyMint service-specific error {:?}, got {e:?}",
+                file!(),
+                line!(),
+                $want
+            ).into()),
+        }
+
+    };
+}
+
 /// Get the value of the given system property, if the given system property doesn't exist
 /// then returns an empty byte vector.
 pub fn get_system_prop(name: &str) -> Vec<u8> {

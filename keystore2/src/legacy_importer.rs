@@ -786,7 +786,7 @@ impl LegacyImporterState {
                 .context(ks_err!("Trying to load legacy blob."))?;
 
             // Determine if the key needs special handling to be deleted.
-            let (need_gc, is_super_encrypted) = km_blob_params
+            let (need_gc, is_super_encrypted, is_de_critical) = km_blob_params
                 .as_ref()
                 .map(|(blob, params)| {
                     let params = match params {
@@ -798,11 +798,16 @@ impl LegacyImporterState {
                             KeyParameterValue::RollbackResistance == *kp.key_parameter_value()
                         }),
                         blob.is_encrypted(),
+                        blob.is_critical_to_device_encryption(),
                     )
                 })
-                .unwrap_or((false, false));
+                .unwrap_or((false, false, false));
 
             if keep_non_super_encrypted_keys && !is_super_encrypted {
+                continue;
+            }
+            if uid == rustutils::users::AID_SYSTEM && is_de_critical {
+                log::info!("skip deletion of system key '{alias}' which is DE-critical");
                 continue;
             }
 

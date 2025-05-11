@@ -22,7 +22,7 @@ use android_system_keystore2::aidl::android::system::keystore2::{
 use keystore2_test_utils::{
     get_keystore_service, key_generations, key_generations::Error, run_as, SecLevel,
 };
-use nix::unistd::{getuid, Gid, Uid};
+use nix::unistd::getuid;
 use rustutils::users::AID_USER_OFFSET;
 
 /// Generate a key and update its public certificate and certificate chain. Test should be able to
@@ -153,9 +153,6 @@ fn keystore2_update_subcomponent_no_key_entry_cert_chain_success() {
 /// permissions, test should be able to update public certificate and cert-chain successfully.
 #[test]
 fn keystore2_update_subcomponent_fails_permission_denied() {
-    static GRANTOR_SU_CTX: &str = "u:r:su:s0";
-    static GRANTEE_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
-
     const USER_ID_1: u32 = 99;
     const APPLICATION_ID: u32 = 10001;
     static GRANTEE_1_UID: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID;
@@ -166,117 +163,102 @@ fn keystore2_update_subcomponent_fails_permission_denied() {
     static GRANTEE_2_GID: u32 = GRANTEE_2_UID;
 
     // Generate a key and grant it to multiple users with different access permissions.
-    // SAFETY: The test is run in a separate process with no other threads.
-    let mut granted_keys = unsafe {
-        run_as::run_as(GRANTOR_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            let sl = SecLevel::tee();
-            let alias = format!("ks_update_subcompo_test_1_{}", getuid());
-            let mut granted_keys = Vec::new();
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let alias = format!("ks_update_subcompo_test_1_{}", getuid());
+        let mut granted_keys = Vec::new();
 
-            let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sl,
-                Domain::APP,
-                -1,
-                Some(alias),
-                None,
-            )
+        let key_metadata =
+            key_generations::generate_ec_p256_signing_key(&sl, Domain::APP, -1, Some(alias), None)
+                .unwrap();
+
+        // Grant a key without update permission.
+        let access_vector = KeyPermission::GET_INFO.0;
+        let granted_key = sl
+            .keystore2
+            .grant(&key_metadata.key, GRANTEE_1_UID.try_into().unwrap(), access_vector)
             .unwrap();
+        assert_eq!(granted_key.domain, Domain::GRANT);
+        granted_keys.push(granted_key.nspace);
 
-            // Grant a key without update permission.
-            let access_vector = KeyPermission::GET_INFO.0;
-            let granted_key = sl
-                .keystore2
-                .grant(&key_metadata.key, GRANTEE_1_UID.try_into().unwrap(), access_vector)
-                .unwrap();
-            assert_eq!(granted_key.domain, Domain::GRANT);
-            granted_keys.push(granted_key.nspace);
+        // Grant a key with update permission.
+        let access_vector = KeyPermission::GET_INFO.0 | KeyPermission::UPDATE.0;
+        let granted_key = sl
+            .keystore2
+            .grant(&key_metadata.key, GRANTEE_2_UID.try_into().unwrap(), access_vector)
+            .unwrap();
+        assert_eq!(granted_key.domain, Domain::GRANT);
+        granted_keys.push(granted_key.nspace);
 
-            // Grant a key with update permission.
-            let access_vector = KeyPermission::GET_INFO.0 | KeyPermission::UPDATE.0;
-            let granted_key = sl
-                .keystore2
-                .grant(&key_metadata.key, GRANTEE_2_UID.try_into().unwrap(), access_vector)
-                .unwrap();
-            assert_eq!(granted_key.domain, Domain::GRANT);
-            granted_keys.push(granted_key.nspace);
-
-            granted_keys
-        })
+        granted_keys
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let mut granted_keys = unsafe { run_as::run_as_root(grantor_fn) };
 
     // Grantee context, try to update the key public certs, permission denied error is expected.
     let granted_key1_nspace = granted_keys.remove(0);
-    // SAFETY: The test is run in a separate process with no other threads.
-    unsafe {
-        run_as::run_as(
-            GRANTEE_CTX,
-            Uid::from_raw(GRANTEE_1_UID),
-            Gid::from_raw(GRANTEE_1_GID),
-            move || {
-                let keystore2 = get_keystore_service();
+    let grantee1_fn = move || {
+        let keystore2 = get_keystore_service();
 
-                let other_cert: [u8; 32] = [123; 32];
-                let other_cert_chain: [u8; 32] = [12; 32];
+        let other_cert: [u8; 32] = [123; 32];
+        let other_cert_chain: [u8; 32] = [12; 32];
 
-                let result = key_generations::map_ks_error(keystore2.updateSubcomponent(
-                    &KeyDescriptor {
-                        domain: Domain::GRANT,
-                        nspace: granted_key1_nspace,
-                        alias: None,
-                        blob: None,
-                    },
-                    Some(&other_cert),
-                    Some(&other_cert_chain),
-                ));
-                assert!(result.is_err());
-                assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
+        let result = key_generations::map_ks_error(keystore2.updateSubcomponent(
+            &KeyDescriptor {
+                domain: Domain::GRANT,
+                nspace: granted_key1_nspace,
+                alias: None,
+                blob: None,
             },
-        )
+            Some(&other_cert),
+            Some(&other_cert_chain),
+        ));
+        assert!(result.is_err());
+        assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(GRANTEE_1_UID, GRANTEE_1_GID, grantee1_fn) };
 
     // Grantee context, update granted key public certs. Update should happen successfully.
     let granted_key2_nspace = granted_keys.remove(0);
-    // SAFETY: The test is run in a separate process with no other threads.
-    unsafe {
-        run_as::run_as(
-            GRANTEE_CTX,
-            Uid::from_raw(GRANTEE_2_UID),
-            Gid::from_raw(GRANTEE_2_GID),
-            move || {
-                let keystore2 = get_keystore_service();
+    let grantee2_fn = move || {
+        let keystore2 = get_keystore_service();
 
-                let other_cert: [u8; 32] = [124; 32];
-                let other_cert_chain: [u8; 32] = [13; 32];
+        let other_cert: [u8; 32] = [124; 32];
+        let other_cert_chain: [u8; 32] = [13; 32];
 
-                keystore2
-                    .updateSubcomponent(
-                        &KeyDescriptor {
-                            domain: Domain::GRANT,
-                            nspace: granted_key2_nspace,
-                            alias: None,
-                            blob: None,
-                        },
-                        Some(&other_cert),
-                        Some(&other_cert_chain),
-                    )
-                    .expect("updateSubcomponent should have succeeded.");
+        keystore2
+            .updateSubcomponent(
+                &KeyDescriptor {
+                    domain: Domain::GRANT,
+                    nspace: granted_key2_nspace,
+                    alias: None,
+                    blob: None,
+                },
+                Some(&other_cert),
+                Some(&other_cert_chain),
+            )
+            .expect("updateSubcomponent should have succeeded.");
 
-                let key_entry_response = keystore2
-                    .getKeyEntry(&KeyDescriptor {
-                        domain: Domain::GRANT,
-                        nspace: granted_key2_nspace,
-                        alias: None,
-                        blob: None,
-                    })
-                    .unwrap();
-                assert_eq!(Some(other_cert.to_vec()), key_entry_response.metadata.certificate);
-                assert_eq!(
-                    Some(other_cert_chain.to_vec()),
-                    key_entry_response.metadata.certificateChain
-                );
-            },
-        )
+        let key_entry_response = keystore2
+            .getKeyEntry(&KeyDescriptor {
+                domain: Domain::GRANT,
+                nspace: granted_key2_nspace,
+                alias: None,
+                blob: None,
+            })
+            .unwrap();
+        assert_eq!(Some(other_cert.to_vec()), key_entry_response.metadata.certificate);
+        assert_eq!(Some(other_cert_chain.to_vec()), key_entry_response.metadata.certificateChain);
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(GRANTEE_2_UID, GRANTEE_2_GID, grantee2_fn) };
 }
 
 #[test]

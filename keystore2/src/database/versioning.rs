@@ -61,7 +61,7 @@ fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> 
     Ok(version)
 }
 
-fn update_version(tx: &Transaction, new_version: u32) -> Result<()> {
+pub(crate) fn update_version(tx: &Transaction, new_version: u32) -> Result<()> {
     let updated = tx
         .execute("UPDATE persistent.version SET version = ? WHERE id = 0;", params![new_version])
         .context("In update_version: Failed to update row.")?;
@@ -82,9 +82,11 @@ where
     let mut db_version = create_or_get_version(tx, current_version)
         .context("In upgrade_database: Failed to get database version.")?;
     while db_version < current_version {
+        log::info!("Current DB version={db_version}, perform upgrade");
         db_version = upgraders[db_version as usize](tx).with_context(|| {
             format!("In upgrade_database: Trying to upgrade from db version {}.", db_version)
         })?;
+        log::info!("DB upgrade successful, current DB version now={db_version}");
     }
     update_version(tx, db_version).context("In upgrade_database.")
 }

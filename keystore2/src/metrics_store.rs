@@ -22,6 +22,7 @@ use crate::globals::DB;
 use crate::key_parameter::KeyParameterValue as KsKeyParamValue;
 use crate::ks_err;
 use crate::operation::Outcome;
+use crate::utils::watchdog as wd;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     HardwareAuthenticatorType::HardwareAuthenticatorType, KeyOrigin::KeyOrigin,
@@ -104,11 +105,13 @@ impl MetricsStore {
         // StorageStats is an original pulled atom (i.e. not a pushed atom converted to a
         // pulled atom). Therefore, it is handled separately.
         if AtomID::STORAGE_STATS == atom_id {
+            let _wp = wd::watch("MetricsStore::get_atoms calling pull_storage_stats");
             return pull_storage_stats();
         }
 
         // Process keystore crash stats.
         if AtomID::CRASH_STATS == atom_id {
+            let _wp = wd::watch("MetricsStore::get_atoms calling read_keystore_crash_count");
             return match read_keystore_crash_count()? {
                 Some(count) => Ok(vec![KeystoreAtom {
                     payload: KeystoreAtomPayload::CrashStats(CrashStats {
@@ -120,8 +123,6 @@ impl MetricsStore {
             };
         }
 
-        // It is safe to call unwrap here since the lock can not be poisoned based on its usage
-        // in this module and the lock is not acquired in the same thread before.
         let metrics_store_guard = self.metrics_store.lock().unwrap();
         metrics_store_guard.get(&atom_id).map_or(Ok(Vec::<KeystoreAtom>::new()), |atom_count_map| {
             Ok(atom_count_map
@@ -133,8 +134,6 @@ impl MetricsStore {
 
     /// Insert an atom object to the metrics_store indexed by the atom ID.
     fn insert_atom(&self, atom_id: AtomID, atom: KeystoreAtomPayload) {
-        // It is ok to unwrap here since the mutex cannot be poisoned according to the way it is
-        // used in this module. And the lock is not acquired by this thread before.
         let mut metrics_store_guard = self.metrics_store.lock().unwrap();
         let atom_count_map = metrics_store_guard.entry(atom_id).or_default();
         if atom_count_map.len() < MetricsStore::SINGLE_ATOM_STORE_MAX_SIZE {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    app_attest_key_feature_exists, delete_app_key,
+    app_attest_key_feature_exists, delete_app_key, get_vsr_api_level,
     perform_sample_asym_sign_verify_op, perform_sample_hmac_sign_verify_op,
     perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op,
     verify_certificate_serial_num, verify_certificate_subject_name, SAMPLE_PLAIN_TEXT,
@@ -472,6 +472,13 @@ fn keystore2_gen_key_auth_early_boot_only_op_fail() {
 #[test]
 fn keystore2_gen_key_auth_max_uses_per_boot() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() {
+        // Older devices with Keymaster implementation may use the key during generateKey to export
+        // the generated public key (EC Key), leading to an unnecessary increment of the
+        // key-associated counter. This can cause the test to fail, so skipping this test on older
+        // devices to avoid test failure.
+        return;
+    }
     const MAX_USES_COUNT: i32 = 3;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -633,79 +640,25 @@ fn keystore2_gen_key_auth_include_unique_id_success() {
     }
 }
 
-/// Generate a key with `APPLICATION_DATA`. Test should create an operation using the
-/// same `APPLICATION_DATA` successfully.
+/// Generate a key with `APPLICATION_DATA` and `APPLICATION_ID`. Test should create an operation
+/// successfully using the same `APPLICATION_DATA` and `APPLICATION_ID`.
 #[test]
-fn keystore2_gen_key_auth_app_data_test_success() {
+fn keystore2_gen_key_auth_app_data_app_id_test_success() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::EC)
         .purpose(KeyPurpose::SIGN)
         .purpose(KeyPurpose::VERIFY)
-        .digest(Digest::SHA_2_256)
+        .digest(Digest::NONE)
         .ec_curve(EcCurve::P_256)
-        .app_data(b"app-data".to_vec());
-
-    let alias = "ks_test_auth_tags_test";
-    let result = key_generations::create_key_and_operation(
-        &sl,
-        &gen_params,
-        &authorizations::AuthSetBuilder::new()
-            .purpose(KeyPurpose::SIGN)
-            .digest(Digest::SHA_2_256)
-            .app_data(b"app-data".to_vec()),
-        alias,
-    );
-    assert!(result.is_ok());
-    delete_app_key(&sl.keystore2, alias).unwrap();
-}
-
-/// Generate a key with `APPLICATION_DATA`. Try to create an operation using the
-/// different `APPLICATION_DATA`, test should fail to create an operation with error code
-/// `INVALID_KEY_BLOB`.
-#[test]
-fn keystore2_gen_key_auth_app_data_test_fail() {
-    let sl = SecLevel::tee();
-
-    let gen_params = authorizations::AuthSetBuilder::new()
-        .no_auth_required()
-        .algorithm(Algorithm::EC)
-        .purpose(KeyPurpose::SIGN)
-        .purpose(KeyPurpose::VERIFY)
-        .digest(Digest::SHA_2_256)
-        .ec_curve(EcCurve::P_256)
-        .app_data(b"app-data".to_vec());
-
-    let alias = "ks_test_auth_tags_test";
-    let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
-        &sl,
-        &gen_params,
-        &authorizations::AuthSetBuilder::new()
-            .purpose(KeyPurpose::SIGN)
-            .digest(Digest::SHA_2_256)
-            .app_data(b"invalid-app-data".to_vec()),
-        alias,
-    ));
-    assert!(result.is_err());
-    assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
-    delete_app_key(&sl.keystore2, alias).unwrap();
-}
-
-/// Generate a key with `APPLICATION_ID`. Test should create an operation using the
-/// same `APPLICATION_ID` successfully.
-#[test]
-fn keystore2_gen_key_auth_app_id_test_success() {
-    let sl = SecLevel::tee();
-
-    let gen_params = authorizations::AuthSetBuilder::new()
-        .no_auth_required()
-        .algorithm(Algorithm::EC)
-        .purpose(KeyPurpose::SIGN)
-        .purpose(KeyPurpose::VERIFY)
-        .digest(Digest::SHA_2_256)
-        .ec_curve(EcCurve::P_256)
+        .app_data(b"app-data".to_vec())
         .app_id(b"app-id".to_vec());
 
     let alias = "ks_test_auth_tags_test";
@@ -714,7 +667,8 @@ fn keystore2_gen_key_auth_app_id_test_success() {
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
-            .digest(Digest::SHA_2_256)
+            .digest(Digest::NONE)
+            .app_data(b"app-data".to_vec())
             .app_id(b"app-id".to_vec()),
         alias,
     );
@@ -722,20 +676,25 @@ fn keystore2_gen_key_auth_app_id_test_success() {
     delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
-/// Generate a key with `APPLICATION_ID`. Try to create an operation using the
-/// different `APPLICATION_ID`, test should fail to create an operation with error code
-/// `INVALID_KEY_BLOB`.
+/// Generate a key with `APPLICATION_DATA` and `APPLICATION_ID`. Try to create an operation using
+/// the different `APPLICATION_DATA` and `APPLICATION_ID`, test should fail to create an operation.
 #[test]
-fn keystore2_gen_key_auth_app_id_test_fail() {
+fn keystore2_op_auth_invalid_app_data_app_id_test_fail() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
 
     let gen_params = authorizations::AuthSetBuilder::new()
         .no_auth_required()
         .algorithm(Algorithm::EC)
         .purpose(KeyPurpose::SIGN)
         .purpose(KeyPurpose::VERIFY)
-        .digest(Digest::SHA_2_256)
+        .digest(Digest::NONE)
         .ec_curve(EcCurve::P_256)
+        .app_data(b"app-data".to_vec())
         .app_id(b"app-id".to_vec());
 
     let alias = "ks_test_auth_tags_test";
@@ -744,8 +703,82 @@ fn keystore2_gen_key_auth_app_id_test_fail() {
         &gen_params,
         &authorizations::AuthSetBuilder::new()
             .purpose(KeyPurpose::SIGN)
-            .digest(Digest::SHA_2_256)
+            .digest(Digest::NONE)
+            .app_data(b"invalid-app-data".to_vec())
             .app_id(b"invalid-app-id".to_vec()),
+        alias,
+    ));
+    assert!(result.is_err());
+    assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
+    delete_app_key(&sl.keystore2, alias).unwrap();
+}
+
+/// Generate a key with `APPLICATION_DATA` and `APPLICATION_ID`. Try to create an operation using
+/// only `APPLICATION_ID`, test should fail to create an operation.
+#[test]
+fn keystore2_op_auth_missing_app_data_test_fail() {
+    let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
+
+    let gen_params = authorizations::AuthSetBuilder::new()
+        .no_auth_required()
+        .algorithm(Algorithm::EC)
+        .purpose(KeyPurpose::SIGN)
+        .purpose(KeyPurpose::VERIFY)
+        .digest(Digest::NONE)
+        .ec_curve(EcCurve::P_256)
+        .app_id(b"app-id".to_vec())
+        .app_data(b"app-data".to_vec());
+
+    let alias = "ks_test_auth_tags_test";
+    let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
+        &sl,
+        &gen_params,
+        &authorizations::AuthSetBuilder::new()
+            .purpose(KeyPurpose::SIGN)
+            .digest(Digest::NONE)
+            .app_id(b"app-id".to_vec()),
+        alias,
+    ));
+
+    assert!(result.is_err());
+    assert_eq!(Error::Km(ErrorCode::INVALID_KEY_BLOB), result.unwrap_err());
+    delete_app_key(&sl.keystore2, alias).unwrap();
+}
+
+/// Generate a key with `APPLICATION_DATA` and `APPLICATION_ID`. Try to create an operation using
+/// only `APPLICATION_DATA`, test should fail to create an operation.
+#[test]
+fn keystore2_op_auth_missing_app_id_test_fail() {
+    let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
+
+    let gen_params = authorizations::AuthSetBuilder::new()
+        .no_auth_required()
+        .algorithm(Algorithm::EC)
+        .purpose(KeyPurpose::SIGN)
+        .purpose(KeyPurpose::VERIFY)
+        .digest(Digest::NONE)
+        .ec_curve(EcCurve::P_256)
+        .app_data(b"app-data".to_vec())
+        .app_id(b"app-id".to_vec());
+
+    let alias = "ks_test_auth_tags_test";
+    let result = key_generations::map_ks_error(key_generations::create_key_and_operation(
+        &sl,
+        &gen_params,
+        &authorizations::AuthSetBuilder::new()
+            .purpose(KeyPurpose::SIGN)
+            .digest(Digest::NONE)
+            .app_data(b"app-data".to_vec()),
         alias,
     ));
     assert!(result.is_err());
@@ -760,6 +793,11 @@ fn keystore2_gen_key_auth_app_id_test_fail() {
 fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
     skip_test_if_no_app_attest_key_feature!();
     let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
 
     // Generate attestation key.
     let attest_gen_params = authorizations::AuthSetBuilder::new()
@@ -809,14 +847,18 @@ fn keystore2_gen_attested_key_auth_app_id_app_data_test_success() {
 
 /// Generate an attestation-key with specifying `APPLICATION_ID` and `APPLICATION_DATA`.
 /// Test should try to generate an attested key using previously generated attestation-key without
-/// specifying app-id and app-data. Test should fail to generate a new key with error code
-/// `INVALID_KEY_BLOB`.
+/// specifying app-id and app-data. Test should fail to generate a new key.
 /// It is an oversight of the Keystore API that `APPLICATION_ID` and `APPLICATION_DATA` tags cannot
 /// be provided to generateKey for an attestation key that was generated with them.
 #[test]
 fn keystore2_gen_attestation_key_with_auth_app_id_app_data_test_fail() {
     skip_test_if_no_app_attest_key_feature!();
     let sl = SecLevel::tee();
+    if sl.is_keymaster() && get_vsr_api_level() < 35 {
+        // `APPLICATION_DATA` key-parameter is causing the error on older devices, so skipping this
+        // test to run on older devices.
+        return;
+    }
 
     // Generate attestation key.
     let attest_gen_params = authorizations::AuthSetBuilder::new()

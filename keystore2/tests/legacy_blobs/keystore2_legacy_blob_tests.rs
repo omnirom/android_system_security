@@ -27,7 +27,7 @@ use keystore2::legacy_blob::LegacyKeyCharacteristics;
 use keystore2::utils::AesGcm;
 use keystore2_crypto::{Password, ZVec};
 use keystore2_test_utils::{get_keystore_service, key_generations, run_as, SecLevel};
-use nix::unistd::{getuid, Gid, Uid};
+use nix::unistd::getuid;
 use rustutils::users::AID_USER_OFFSET;
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
@@ -128,8 +128,6 @@ fn keystore2_restart_service() {
 fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
     let auid = 99 * AID_USER_OFFSET + 10001;
     let agid = 99 * AID_USER_OFFSET + 10001;
-    static TARGET_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
-    static TARGET_SU_CTX: &str = "u:r:su:s0";
 
     // Cleanup user directory if it exists
     let path_buf = PathBuf::from("/data/misc/keystore/user_99");
@@ -137,204 +135,201 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
         std::fs::remove_dir_all(path_buf.as_path()).unwrap();
     }
 
-    // Safety: run_as must be called from a single threaded process.
-    // This device test is run as a separate single threaded process.
-    let mut gen_key_result = unsafe {
-        run_as::run_as(TARGET_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            // Remove user if already exist.
-            let maint_service = get_maintenance();
-            match maint_service.onUserRemoved(99) {
-                Ok(_) => {
-                    println!("User was existed, deleted successfully");
-                }
-                Err(e) => {
-                    println!("onUserRemoved error: {:#?}", e);
-                }
+    let gen_key_fn = || {
+        // Remove user if already exist.
+        let maint_service = get_maintenance();
+        match maint_service.onUserRemoved(99) {
+            Ok(_) => {
+                println!("User did exist, deleted successfully");
             }
-            let sl = SecLevel::tee();
+            Err(e) => {
+                println!("onUserRemoved error: {:#?}", e);
+            }
+        }
+        let sl = SecLevel::tee();
 
-            // Generate Key BLOB and prepare legacy keystore blob files.
-            let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
-            let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sl,
-                Domain::BLOB,
-                SELINUX_SHELL_NAMESPACE,
-                None,
-                att_challenge,
+        // Generate Key BLOB and prepare legacy keystore blob files.
+        let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
+        let key_metadata = key_generations::generate_ec_p256_signing_key(
+            &sl,
+            Domain::BLOB,
+            SELINUX_SHELL_NAMESPACE,
+            None,
+            att_challenge,
+        )
+        .expect("Failed to generate key blob");
+
+        // Create keystore file layout for user_99.
+        let pw: Password = PASSWORD.into();
+        let pw_key = TestKey(pw.derive_key_pbkdf2(SUPERKEY_SALT, 32).unwrap());
+        let super_key =
+            TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
+
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
+        if !path_buf.as_path().is_dir() {
+            std::fs::create_dir(path_buf.as_path()).unwrap();
+        }
+        path_buf.push(".masterkey");
+        if !path_buf.as_path().is_file() {
+            std::fs::write(path_buf.as_path(), SUPERKEY).unwrap();
+        }
+
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
+        path_buf.push("9910001_USRPKEY_authbound");
+        if !path_buf.as_path().is_file() {
+            make_encrypted_key_file(
+                path_buf.as_path(),
+                &super_key,
+                &key_metadata.key.blob.unwrap(),
             )
-            .expect("Failed to generate key blob");
+            .unwrap();
+        }
 
-            // Create keystore file layout for user_99.
-            let pw: Password = PASSWORD.into();
-            let pw_key = TestKey(pw.derive_key_pbkdf2(SUPERKEY_SALT, 32).unwrap());
-            let super_key =
-                TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
-
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
-            if !path_buf.as_path().is_dir() {
-                std::fs::create_dir(path_buf.as_path()).unwrap();
-            }
-            path_buf.push(".masterkey");
-            if !path_buf.as_path().is_file() {
-                std::fs::write(path_buf.as_path(), SUPERKEY).unwrap();
-            }
-
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
-            path_buf.push("9910001_USRPKEY_authbound");
-            if !path_buf.as_path().is_file() {
-                make_encrypted_key_file(
-                    path_buf.as_path(),
-                    &super_key,
-                    &key_metadata.key.blob.unwrap(),
-                )
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
+        path_buf.push(".9910001_chr_USRPKEY_authbound");
+        if !path_buf.as_path().is_file() {
+            make_encrypted_characteristics_file(path_buf.as_path(), &super_key, KEY_PARAMETERS)
                 .unwrap();
-            }
+        }
 
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
+        path_buf.push("9910001_USRCERT_authbound");
+        if !path_buf.as_path().is_file() {
+            make_cert_blob_file(path_buf.as_path(), key_metadata.certificate.as_ref().unwrap())
+                .unwrap();
+        }
+
+        if let Some(chain) = key_metadata.certificateChain.as_ref() {
             let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
-            path_buf.push(".9910001_chr_USRPKEY_authbound");
+            path_buf.push("9910001_CACERT_authbound");
             if !path_buf.as_path().is_file() {
-                make_encrypted_characteristics_file(path_buf.as_path(), &super_key, KEY_PARAMETERS)
-                    .unwrap();
+                make_cert_blob_file(path_buf.as_path(), chain).unwrap();
             }
+        }
 
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
-            path_buf.push("9910001_USRCERT_authbound");
-            if !path_buf.as_path().is_file() {
-                make_cert_blob_file(path_buf.as_path(), key_metadata.certificate.as_ref().unwrap())
-                    .unwrap();
+        // Keystore2 disables the legacy importer when it finds the legacy database empty.
+        // However, if the device boots with an empty legacy database, the optimization kicks in
+        // and keystore2 never checks the legacy file system layout.
+        // So, restart keystore2 service to detect populated legacy database.
+        keystore2_restart_service();
+
+        let auth_service = get_authorization();
+        match auth_service.onDeviceUnlocked(99, Some(PASSWORD)) {
+            Ok(result) => {
+                println!("Unlock Result: {:?}", result);
             }
-
-            if let Some(chain) = key_metadata.certificateChain.as_ref() {
-                let mut path_buf = PathBuf::from("/data/misc/keystore/user_99");
-                path_buf.push("9910001_CACERT_authbound");
-                if !path_buf.as_path().is_file() {
-                    make_cert_blob_file(path_buf.as_path(), chain).unwrap();
-                }
+            Err(e) => {
+                panic!("Unlock should have succeeded: {:?}", e);
             }
+        }
 
-            // Keystore2 disables the legacy importer when it finds the legacy database empty.
-            // However, if the device boots with an empty legacy database, the optimization kicks in
-            // and keystore2 never checks the legacy file system layout.
-            // So, restart keystore2 service to detect populated legacy database.
-            keystore2_restart_service();
+        let mut key_params: Vec<KsKeyparameter> = Vec::new();
+        for param in key_metadata.authorizations {
+            let key_param = KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
+            key_params.push(key_param);
+        }
 
-            let auth_service = get_authorization();
-            match auth_service.onDeviceUnlocked(99, Some(PASSWORD)) {
-                Ok(result) => {
-                    println!("Unlock Result: {:?}", result);
-                }
-                Err(e) => {
-                    panic!("Unlock should have succeeded: {:?}", e);
-                }
-            }
-
-            let mut key_params: Vec<KsKeyparameter> = Vec::new();
-            for param in key_metadata.authorizations {
-                let key_param = KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
-                key_params.push(key_param);
-            }
-
-            KeygenResult {
-                cert: key_metadata.certificate.unwrap(),
-                cert_chain: key_metadata.certificateChain.unwrap_or_default(),
-                key_parameters: key_params,
-            }
-        })
+        KeygenResult {
+            cert: key_metadata.certificate.unwrap(),
+            cert_chain: key_metadata.certificateChain.unwrap_or_default(),
+            key_parameters: key_params,
+        }
     };
 
-    // Safety: run_as must be called from a single threaded process.
-    // This device test is run as a separate single threaded process.
-    unsafe {
-        run_as::run_as(TARGET_CTX, Uid::from_raw(auid), Gid::from_raw(agid), move || {
-            println!("UID: {}", getuid());
-            println!("Android User ID: {}", rustutils::users::multiuser_get_user_id(9910001));
-            println!("Android app ID: {}", rustutils::users::multiuser_get_app_id(9910001));
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let mut gen_key_result = unsafe { run_as::run_as_root(gen_key_fn) };
 
-            let test_alias = "authbound";
-            let keystore2 = get_keystore_service();
+    let use_key_fn = move || {
+        println!("UID: {}", getuid());
+        println!("Android User ID: {}", rustutils::users::multiuser_get_user_id(9910001));
+        println!("Android app ID: {}", rustutils::users::multiuser_get_app_id(9910001));
 
-            match keystore2.getKeyEntry(&KeyDescriptor {
-                domain: Domain::APP,
-                nspace: SELINUX_SHELL_NAMESPACE,
-                alias: Some(test_alias.to_string()),
-                blob: None,
-            }) {
-                Ok(key_entry_response) => {
-                    assert_eq!(
-                        key_entry_response.metadata.certificate.unwrap(),
-                        gen_key_result.cert
-                    );
-                    assert_eq!(
-                        key_entry_response.metadata.certificateChain.unwrap_or_default(),
-                        gen_key_result.cert_chain
-                    );
-                    assert_eq!(key_entry_response.metadata.key.domain, Domain::KEY_ID);
-                    assert_ne!(key_entry_response.metadata.key.nspace, 0);
-                    assert_eq!(
-                        key_entry_response.metadata.keySecurityLevel,
-                        SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT
-                    );
+        let test_alias = "authbound";
+        let keystore2 = get_keystore_service();
 
-                    // Preapare KsKeyParameter list from getKeEntry response Authorizations.
-                    let mut key_params: Vec<KsKeyparameter> = Vec::new();
-                    for param in key_entry_response.metadata.authorizations {
-                        let key_param =
-                            KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
-                        key_params.push(key_param);
-                    }
+        match keystore2.getKeyEntry(&KeyDescriptor {
+            domain: Domain::APP,
+            nspace: SELINUX_SHELL_NAMESPACE,
+            alias: Some(test_alias.to_string()),
+            blob: None,
+        }) {
+            Ok(key_entry_response) => {
+                assert_eq!(key_entry_response.metadata.certificate.unwrap(), gen_key_result.cert);
+                assert_eq!(
+                    key_entry_response.metadata.certificateChain.unwrap_or_default(),
+                    gen_key_result.cert_chain
+                );
+                assert_eq!(key_entry_response.metadata.key.domain, Domain::KEY_ID);
+                assert_ne!(key_entry_response.metadata.key.nspace, 0);
+                assert_eq!(
+                    key_entry_response.metadata.keySecurityLevel,
+                    SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT
+                );
 
-                    // Combine keyparameters from gen_key_result and keyparameters
-                    // from legacy key-char file.
-                    let mut legacy_file_key_params: Vec<KsKeyparameter> = Vec::new();
-                    match structured_test_params() {
-                        LegacyKeyCharacteristics::File(legacy_key_params) => {
-                            for param in &legacy_key_params {
-                                let mut present_in_gen_params = false;
-                                for gen_param in &gen_key_result.key_parameters {
-                                    if param.get_tag() == gen_param.get_tag() {
-                                        present_in_gen_params = true;
-                                    }
-                                }
-                                if !present_in_gen_params {
-                                    legacy_file_key_params.push(param.clone());
+                // Preapare KsKeyParameter list from getKeEntry response Authorizations.
+                let mut key_params: Vec<KsKeyparameter> = Vec::new();
+                for param in key_entry_response.metadata.authorizations {
+                    let key_param =
+                        KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
+                    key_params.push(key_param);
+                }
+
+                // Combine keyparameters from gen_key_result and keyparameters
+                // from legacy key-char file.
+                let mut legacy_file_key_params: Vec<KsKeyparameter> = Vec::new();
+                match structured_test_params() {
+                    LegacyKeyCharacteristics::File(legacy_key_params) => {
+                        for param in &legacy_key_params {
+                            let mut present_in_gen_params = false;
+                            for gen_param in &gen_key_result.key_parameters {
+                                if param.get_tag() == gen_param.get_tag() {
+                                    present_in_gen_params = true;
                                 }
                             }
-                        }
-                        _ => {
-                            panic!("Expecting file characteristics");
+                            if !present_in_gen_params {
+                                legacy_file_key_params.push(param.clone());
+                            }
                         }
                     }
-
-                    // Remove Key-Params which have security levels other than TRUSTED_ENVIRONMENT
-                    gen_key_result.key_parameters.retain(|in_element| {
-                        *in_element.security_level()
-                            == SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT
-                    });
-
-                    println!("GetKeyEntry response key params: {:#?}", key_params);
-                    println!("Generated key params: {:#?}", gen_key_result.key_parameters);
-
-                    gen_key_result.key_parameters.append(&mut legacy_file_key_params);
-
-                    println!("Combined key params: {:#?}", gen_key_result.key_parameters);
-
-                    // Validate all keyparameters present in getKeyEntry response.
-                    for param in &key_params {
-                        gen_key_result.key_parameters.retain(|in_element| *in_element != *param);
+                    _ => {
+                        panic!("Expecting file characteristics");
                     }
+                }
 
-                    println!(
-                        "GetKeyEntry response unmatched key params: {:#?}",
-                        gen_key_result.key_parameters
-                    );
-                    assert_eq!(gen_key_result.key_parameters.len(), 0);
+                // Remove Key-Params which have security levels other than TRUSTED_ENVIRONMENT
+                gen_key_result.key_parameters.retain(|in_element| {
+                    *in_element.security_level()
+                        == SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT
+                });
+
+                println!("GetKeyEntry response key params: {:#?}", key_params);
+                println!("Generated key params: {:#?}", gen_key_result.key_parameters);
+
+                gen_key_result.key_parameters.append(&mut legacy_file_key_params);
+
+                println!("Combined key params: {:#?}", gen_key_result.key_parameters);
+
+                // Validate all keyparameters present in getKeyEntry response.
+                for param in &key_params {
+                    gen_key_result.key_parameters.retain(|in_element| *in_element != *param);
                 }
-                Err(s) => {
-                    panic!("getKeyEntry should have succeeded. {:?}", s);
-                }
-            };
-        })
+
+                println!(
+                    "GetKeyEntry response unmatched key params: {:#?}",
+                    gen_key_result.key_parameters
+                );
+                assert_eq!(gen_key_result.key_parameters.len(), 0);
+            }
+            Err(s) => {
+                panic!("getKeyEntry should have succeeded. {:?}", s);
+            }
+        };
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(auid, agid, use_key_fn) };
 
     // Make sure keystore2 clean up imported legacy db.
     let path_buf = PathBuf::from("/data/misc/keystore/user_99");
@@ -367,7 +362,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
 ///     6. To load and import the legacy key using its alias.
 ///     7. After successful key import validate the user cert and cert-chain with initially
 ///        generated blobs.
-///     8. Validate imported key perameters. Imported key parameters list should be the combination
+///     8. Validate imported key parameters. Imported key parameters list should be the combination
 ///        of the key-parameters in characteristics file and the characteristics according to
 ///        the augmentation rules. There might be duplicate entries with different values for the
 ///        parameters like OS_VERSION, OS_VERSION, BOOT_PATCHLEVEL, VENDOR_PATCHLEVEL etc.
@@ -376,8 +371,6 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
 fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
     let auid = 98 * AID_USER_OFFSET + 10001;
     let agid = 98 * AID_USER_OFFSET + 10001;
-    static TARGET_CTX: &str = "u:r:untrusted_app:s0:c91,c256,c10,c20";
-    static TARGET_SU_CTX: &str = "u:r:su:s0";
 
     // Cleanup user directory if it exists
     let path_buf = PathBuf::from("/data/misc/keystore/user_98");
@@ -385,176 +378,170 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
         std::fs::remove_dir_all(path_buf.as_path()).unwrap();
     }
 
-    // Safety: run_as must be called from a single threaded process.
-    // This device test is run as a separate single threaded process.
-    let gen_key_result = unsafe {
-        run_as::run_as(TARGET_SU_CTX, Uid::from_raw(0), Gid::from_raw(0), || {
-            // Remove user if already exist.
-            let maint_service = get_maintenance();
-            match maint_service.onUserRemoved(98) {
-                Ok(_) => {
-                    println!("User was existed, deleted successfully");
-                }
-                Err(e) => {
-                    println!("onUserRemoved error: {:#?}", e);
-                }
+    let gen_key_fn = || {
+        // Remove user if already exist.
+        let maint_service = get_maintenance();
+        match maint_service.onUserRemoved(98) {
+            Ok(_) => {
+                println!("User did exist, deleted successfully");
             }
+            Err(e) => {
+                println!("onUserRemoved error: {:#?}", e);
+            }
+        }
 
-            let sl = SecLevel::tee();
-            // Generate Key BLOB and prepare legacy keystore blob files.
-            let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
-            let key_metadata = key_generations::generate_ec_p256_signing_key(
-                &sl,
-                Domain::BLOB,
-                SELINUX_SHELL_NAMESPACE,
-                None,
-                att_challenge,
+        let sl = SecLevel::tee();
+        // Generate Key BLOB and prepare legacy keystore blob files.
+        let att_challenge: Option<&[u8]> = if rkp_only() { None } else { Some(b"foo") };
+        let key_metadata = key_generations::generate_ec_p256_signing_key(
+            &sl,
+            Domain::BLOB,
+            SELINUX_SHELL_NAMESPACE,
+            None,
+            att_challenge,
+        )
+        .expect("Failed to generate key blob");
+
+        // Create keystore file layout for user_98.
+        let pw: Password = PASSWORD.into();
+        let pw_key = TestKey(pw.derive_key_pbkdf2(SUPERKEY_SALT, 32).unwrap());
+        let super_key =
+            TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
+
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
+        if !path_buf.as_path().is_dir() {
+            std::fs::create_dir(path_buf.as_path()).unwrap();
+        }
+        path_buf.push(".masterkey");
+        if !path_buf.as_path().is_file() {
+            std::fs::write(path_buf.as_path(), SUPERKEY).unwrap();
+        }
+
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
+        path_buf.push("9810001_USRPKEY_authboundcertenc");
+        if !path_buf.as_path().is_file() {
+            make_encrypted_key_file(
+                path_buf.as_path(),
+                &super_key,
+                &key_metadata.key.blob.unwrap(),
             )
-            .expect("Failed to generate key blob");
+            .unwrap();
+        }
 
-            // Create keystore file layout for user_98.
-            let pw: Password = PASSWORD.into();
-            let pw_key = TestKey(pw.derive_key_pbkdf2(SUPERKEY_SALT, 32).unwrap());
-            let super_key =
-                TestKey(pw_key.decrypt(SUPERKEY_PAYLOAD, SUPERKEY_IV, SUPERKEY_TAG).unwrap());
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
+        path_buf.push(".9810001_chr_USRPKEY_authboundcertenc");
+        if !path_buf.as_path().is_file() {
+            std::fs::write(path_buf.as_path(), USRPKEY_AUTHBOUND_CHR).unwrap();
+        }
 
+        let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
+        path_buf.push("9810001_USRCERT_authboundcertenc");
+        if !path_buf.as_path().is_file() {
+            make_encrypted_usr_cert_file(
+                path_buf.as_path(),
+                &super_key,
+                key_metadata.certificate.as_ref().unwrap(),
+            )
+            .unwrap();
+        }
+
+        if let Some(chain) = key_metadata.certificateChain.as_ref() {
             let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
-            if !path_buf.as_path().is_dir() {
-                std::fs::create_dir(path_buf.as_path()).unwrap();
-            }
-            path_buf.push(".masterkey");
+            path_buf.push("9810001_CACERT_authboundcertenc");
             if !path_buf.as_path().is_file() {
-                std::fs::write(path_buf.as_path(), SUPERKEY).unwrap();
+                make_encrypted_ca_cert_file(path_buf.as_path(), &super_key, chain).unwrap();
             }
+        }
 
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
-            path_buf.push("9810001_USRPKEY_authboundcertenc");
-            if !path_buf.as_path().is_file() {
-                make_encrypted_key_file(
-                    path_buf.as_path(),
-                    &super_key,
-                    &key_metadata.key.blob.unwrap(),
-                )
-                .unwrap();
+        // Keystore2 disables the legacy importer when it finds the legacy database empty.
+        // However, if the device boots with an empty legacy database, the optimization kicks in
+        // and keystore2 never checks the legacy file system layout.
+        // So, restart keystore2 service to detect populated legacy database.
+        keystore2_restart_service();
+
+        let auth_service = get_authorization();
+        match auth_service.onDeviceUnlocked(98, Some(PASSWORD)) {
+            Ok(result) => {
+                println!("Unlock Result: {:?}", result);
             }
-
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
-            path_buf.push(".9810001_chr_USRPKEY_authboundcertenc");
-            if !path_buf.as_path().is_file() {
-                std::fs::write(path_buf.as_path(), USRPKEY_AUTHBOUND_CHR).unwrap();
+            Err(e) => {
+                panic!("Unlock should have succeeded: {:?}", e);
             }
+        }
 
-            let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
-            path_buf.push("9810001_USRCERT_authboundcertenc");
-            if !path_buf.as_path().is_file() {
-                make_encrypted_usr_cert_file(
-                    path_buf.as_path(),
-                    &super_key,
-                    key_metadata.certificate.as_ref().unwrap(),
-                )
-                .unwrap();
-            }
+        let mut key_params: Vec<KsKeyparameter> = Vec::new();
+        for param in key_metadata.authorizations {
+            let key_param = KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
+            key_params.push(key_param);
+        }
 
-            if let Some(chain) = key_metadata.certificateChain.as_ref() {
-                let mut path_buf = PathBuf::from("/data/misc/keystore/user_98");
-                path_buf.push("9810001_CACERT_authboundcertenc");
-                if !path_buf.as_path().is_file() {
-                    make_encrypted_ca_cert_file(path_buf.as_path(), &super_key, chain).unwrap();
-                }
-            }
-
-            // Keystore2 disables the legacy importer when it finds the legacy database empty.
-            // However, if the device boots with an empty legacy database, the optimization kicks in
-            // and keystore2 never checks the legacy file system layout.
-            // So, restart keystore2 service to detect populated legacy database.
-            keystore2_restart_service();
-
-            let auth_service = get_authorization();
-            match auth_service.onDeviceUnlocked(98, Some(PASSWORD)) {
-                Ok(result) => {
-                    println!("Unlock Result: {:?}", result);
-                }
-                Err(e) => {
-                    panic!("Unlock should have succeeded: {:?}", e);
-                }
-            }
-
-            let mut key_params: Vec<KsKeyparameter> = Vec::new();
-            for param in key_metadata.authorizations {
-                let key_param = KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
-                key_params.push(key_param);
-            }
-
-            KeygenResult {
-                cert: key_metadata.certificate.unwrap(),
-                cert_chain: key_metadata.certificateChain.unwrap_or_default(),
-                key_parameters: key_params,
-            }
-        })
+        KeygenResult {
+            cert: key_metadata.certificate.unwrap(),
+            cert_chain: key_metadata.certificateChain.unwrap_or_default(),
+            key_parameters: key_params,
+        }
     };
 
-    // Safety: run_as must be called from a single threaded process.
-    // This device test is run as a separate single threaded process.
-    unsafe {
-        run_as::run_as(TARGET_CTX, Uid::from_raw(auid), Gid::from_raw(agid), move || {
-            println!("UID: {}", getuid());
-            println!("Android User ID: {}", rustutils::users::multiuser_get_user_id(9810001));
-            println!("Android app ID: {}", rustutils::users::multiuser_get_app_id(9810001));
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    let gen_key_result = unsafe { run_as::run_as_root(gen_key_fn) };
 
-            let test_alias = "authboundcertenc";
-            let keystore2 = get_keystore_service();
+    let use_key_fn = move || {
+        println!("UID: {}", getuid());
+        println!("Android User ID: {}", rustutils::users::multiuser_get_user_id(9810001));
+        println!("Android app ID: {}", rustutils::users::multiuser_get_app_id(9810001));
 
-            match keystore2.getKeyEntry(&KeyDescriptor {
-                domain: Domain::APP,
-                nspace: SELINUX_SHELL_NAMESPACE,
-                alias: Some(test_alias.to_string()),
-                blob: None,
-            }) {
-                Ok(key_entry_response) => {
-                    assert_eq!(
-                        key_entry_response.metadata.certificate.unwrap(),
-                        gen_key_result.cert
-                    );
-                    assert_eq!(
-                        key_entry_response.metadata.certificateChain.unwrap_or_default(),
-                        gen_key_result.cert_chain
-                    );
+        let test_alias = "authboundcertenc";
+        let keystore2 = get_keystore_service();
 
-                    // Preapare KsKeyParameter list from getKeEntry response Authorizations.
-                    let mut key_params: Vec<KsKeyparameter> = Vec::new();
-                    for param in key_entry_response.metadata.authorizations {
-                        let key_param =
-                            KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
-                        key_params.push(key_param);
+        match keystore2.getKeyEntry(&KeyDescriptor {
+            domain: Domain::APP,
+            nspace: SELINUX_SHELL_NAMESPACE,
+            alias: Some(test_alias.to_string()),
+            blob: None,
+        }) {
+            Ok(key_entry_response) => {
+                assert_eq!(key_entry_response.metadata.certificate.unwrap(), gen_key_result.cert);
+                assert_eq!(
+                    key_entry_response.metadata.certificateChain.unwrap_or_default(),
+                    gen_key_result.cert_chain
+                );
+
+                // Preapare KsKeyParameter list from getKeEntry response Authorizations.
+                let mut key_params: Vec<KsKeyparameter> = Vec::new();
+                for param in key_entry_response.metadata.authorizations {
+                    let key_param =
+                        KsKeyparameter::new(param.keyParameter.into(), param.securityLevel);
+                    key_params.push(key_param);
+                }
+
+                println!("GetKeyEntry response key params: {:#?}", key_params);
+                println!("Generated key params: {:#?}", gen_key_result.key_parameters);
+                match structured_test_params_cache() {
+                    LegacyKeyCharacteristics::Cache(legacy_key_params) => {
+                        println!("Legacy key-char cache: {:#?}", legacy_key_params);
+                        // Validate all keyparameters present in getKeyEntry response.
+                        for param in &legacy_key_params {
+                            key_params.retain(|in_element| *in_element != *param);
+                        }
+
+                        println!("GetKeyEntry response unmatched key params: {:#?}", key_params);
+                        assert_eq!(key_params.len(), 0);
                     }
-
-                    println!("GetKeyEntry response key params: {:#?}", key_params);
-                    println!("Generated key params: {:#?}", gen_key_result.key_parameters);
-                    match structured_test_params_cache() {
-                        LegacyKeyCharacteristics::Cache(legacy_key_params) => {
-                            println!("Legacy key-char cache: {:#?}", legacy_key_params);
-                            // Validate all keyparameters present in getKeyEntry response.
-                            for param in &legacy_key_params {
-                                key_params.retain(|in_element| *in_element != *param);
-                            }
-
-                            println!(
-                                "GetKeyEntry response unmatched key params: {:#?}",
-                                key_params
-                            );
-                            assert_eq!(key_params.len(), 0);
-                        }
-                        _ => {
-                            panic!("Expecting file characteristics");
-                        }
+                    _ => {
+                        panic!("Expecting file characteristics");
                     }
                 }
-                Err(s) => {
-                    panic!("getKeyEntry should have succeeded. {:?}", s);
-                }
-            };
-        })
+            }
+            Err(s) => {
+                panic!("getKeyEntry should have succeeded. {:?}", s);
+            }
+        };
     };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder.
+    unsafe { run_as::run_as_app(auid, agid, use_key_fn) };
 
     // Make sure keystore2 clean up imported legacy db.
     let path_buf = PathBuf::from("/data/misc/keystore/user_98");

@@ -23,7 +23,7 @@ use crate::permission::KeyPerm;
 use crate::remote_provisioning::RemProvState;
 use crate::utils::check_key_permission;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    AttestationKey::AttestationKey, Certificate::Certificate, KeyParameter::KeyParameter, Tag::Tag,
+    AttestationKey::AttestationKey, KeyParameter::KeyParameter, Tag::Tag,
 };
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
@@ -37,7 +37,8 @@ use keystore2_crypto::parse_subject_from_certificate;
 pub enum AttestationKeyInfo {
     RkpdProvisioned {
         attestation_key: AttestationKey,
-        attestation_certs: Certificate,
+        /// Concatenated chain of DER-encoded certificates (ending with the root).
+        attestation_certs: Vec<u8>,
     },
     UserGenerated {
         key_id_guard: KeyIdGuard,

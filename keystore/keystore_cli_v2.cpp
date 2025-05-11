@@ -22,11 +22,12 @@
 #include <variant>
 #include <vector>
 
+#include <android-base/strings.h>
+
 #include <base/command_line.h>
 #include <base/files/file_util.h>
 #include <base/strings/string_number_conversions.h>
 #include <base/strings/string_split.h>
-#include <base/strings/string_util.h>
 
 #include <aidl/android/security/apc/BnConfirmationCallback.h>
 #include <aidl/android/security/apc/IProtectedConfirmation.h>
@@ -705,12 +706,12 @@ int BrilloPlatformTest(const std::string& prefix, bool test_for_0_3) {
     std::vector<TestCase> test_cases = GetTestCases();
     for (const auto& test_case : test_cases) {
         if (!prefix.empty() &&
-            !base::StartsWith(test_case.name, prefix, base::CompareCase::SENSITIVE)) {
+            !android::base::StartsWith(test_case.name, prefix)) {
             continue;
         }
         if (test_for_0_3 &&
-            (base::StartsWith(test_case.name, "AES", base::CompareCase::SENSITIVE) ||
-             base::StartsWith(test_case.name, "HMAC", base::CompareCase::SENSITIVE))) {
+            (android::base::StartsWith(test_case.name, "AES") ||
+             android::base::StartsWith(test_case.name, "HMAC"))) {
             continue;
         }
         ++test_count;
@@ -1016,8 +1017,7 @@ int Confirmation(const std::string& promptText, const std::string& extraDataHex,
         return 1;
     }
 
-    std::vector<std::string> pieces =
-        base::SplitString(uiOptionsStr, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    std::vector<std::string> pieces = android::base::Tokenize(uiOptionsStr, ",");
     int uiOptionsAsFlags = 0;
     for (auto& p : pieces) {
         int value;

@@ -308,9 +308,8 @@ impl Operation {
         locked_outcome: &mut Outcome,
         err: Result<T, Error>,
     ) -> Result<T, Error> {
-        match &err {
-            Err(e) => *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e)),
-            Ok(_) => (),
+        if let Err(e) = &err {
+            *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e))
         }
         err
     }

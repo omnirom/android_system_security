@@ -19,7 +19,7 @@ use crate::error::into_logged_binder;
 use crate::error::map_km_error;
 use crate::error::Error;
 use crate::globals::get_keymint_device;
-use crate::globals::{DB, LEGACY_IMPORTER, SUPER_KEY};
+use crate::globals::{DB, LEGACY_IMPORTER, SUPER_KEY, ENCODED_MODULE_INFO};
 use crate::ks_err;
 use crate::permission::{KeyPerm, KeystorePerm};
 use crate::super_key::SuperKeyManager;
@@ -28,7 +28,7 @@ use crate::utils::{
     check_keystore_permission, uid_to_android_user, watchdog as wd,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
-    ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
+    ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
 };
 use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::{
     BnKeystoreMaintenance, IKeystoreMaintenance,
@@ -41,11 +41,36 @@ use android_security_metrics::aidl::android::security::metrics::{
 };
 use android_system_keystore2::aidl::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use android_system_keystore2::aidl::android::system::keystore2::ResponseCode::ResponseCode;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use bssl_crypto::digest;
+use der::{DerOrd, Encode, asn1::OctetString, asn1::SetOfVec, Sequence};
 use keystore2_crypto::Password;
+use std::cmp::Ordering;
 
 /// Reexport Domain for the benefit of DeleteListener
 pub use android_system_keystore2::aidl::android::system::keystore2::Domain::Domain;
+
+/// Version number of KeyMint V4.
+pub const KEYMINT_V4: i32 = 400;
+
+/// Module information structure for DER-encoding.
+#[derive(Sequence, Debug)]
+struct ModuleInfo {
+    name: OctetString,
+    version: i32,
+}
+
+impl DerOrd for ModuleInfo {
+    // DER mandates "encodings of the component values of a set-of value shall appear in ascending
+    // order". `der_cmp` serves as a proxy for determining that ordering (though why the `der` crate
+    // requires this is unclear). Essentially, we just need to compare the `name` lengths, and then
+    // if those are equal, the `name`s themselves. (No need to consider `version`s since there can't
+    // be more than one `ModuleInfo` with the same `name` in the set-of `ModuleInfo`s.) We rely on
+    // `OctetString`'s `der_cmp` to do the aforementioned comparison.
+    fn der_cmp(&self, other: &Self) -> std::result::Result<Ordering, der::Error> {
+        self.name.der_cmp(&other.name)
+    }
+}
 
 /// The Maintenance module takes a delete listener argument which observes user and namespace
 /// deletion events.
@@ -139,19 +164,35 @@ impl Maintenance {
             .context(ks_err!("While invoking the delete listener."))
     }
 
-    fn call_with_watchdog<F>(sec_level: SecurityLevel, name: &'static str, op: &F) -> Result<()>
+    fn call_with_watchdog<F>(
+        sec_level: SecurityLevel,
+        name: &'static str,
+        op: &F,
+        min_version: Option<i32>,
+    ) -> Result<()>
     where
         F: Fn(Strong<dyn IKeyMintDevice>) -> binder::Result<()>,
     {
-        let (km_dev, _, _) =
+        let (km_dev, hw_info, _) =
             get_keymint_device(&sec_level).context(ks_err!("getting keymint device"))?;
+
+        if let Some(min_version) = min_version {
+            if hw_info.versionNumber < min_version {
+                log::info!("skipping {name} for {sec_level:?} since its keymint version {} is less than the minimum required version {min_version}", hw_info.versionNumber);
+                return Ok(());
+            }
+        }
 
         let _wp = wd::watch_millis_with("Maintenance::call_with_watchdog", 500, (sec_level, name));
         map_km_error(op(km_dev)).with_context(|| ks_err!("calling {}", name))?;
         Ok(())
     }
 
-    fn call_on_all_security_levels<F>(name: &'static str, op: F) -> Result<()>
+    fn call_on_all_security_levels<F>(
+        name: &'static str,
+        op: F,
+        min_version: Option<i32>,
+    ) -> Result<()>
     where
         F: Fn(Strong<dyn IKeyMintDevice>) -> binder::Result<()>,
     {
@@ -160,7 +201,7 @@ impl Maintenance {
             (SecurityLevel::STRONGBOX, "STRONGBOX"),
         ];
         sec_levels.iter().try_fold((), |_result, (sec_level, sec_level_string)| {
-            let curr_result = Maintenance::call_with_watchdog(*sec_level, name, &op);
+            let curr_result = Maintenance::call_with_watchdog(*sec_level, name, &op, min_version);
             match curr_result {
                 Ok(()) => log::info!(
                     "Call to {} succeeded for security level {}.",
@@ -197,7 +238,8 @@ impl Maintenance {
         {
             log::error!("SUPER_KEY.set_up_boot_level_cache failed:\n{:?}\n:(", e);
         }
-        Maintenance::call_on_all_security_levels("earlyBootEnded", |dev| dev.earlyBootEnded())
+
+        Maintenance::call_on_all_security_levels("earlyBootEnded", |dev| dev.earlyBootEnded(), None)
     }
 
     fn migrate_key_namespace(source: &KeyDescriptor, destination: &KeyDescriptor) -> Result<()> {
@@ -253,7 +295,7 @@ impl Maintenance {
             .context(ks_err!("Checking permission"))?;
         log::info!("In delete_all_keys.");
 
-        Maintenance::call_on_all_security_levels("deleteAllKeys", |dev| dev.deleteAllKeys())
+        Maintenance::call_on_all_security_levels("deleteAllKeys", |dev| dev.deleteAllKeys(), None)
     }
 
     fn get_app_uids_affected_by_sid(
@@ -319,6 +361,44 @@ impl Maintenance {
         // careful not to include confidential information (e.g. key material).
 
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn set_module_info(module_info: Vec<ModuleInfo>) -> Result<()> {
+        let encoding = Self::encode_module_info(module_info)
+            .map_err(|e| anyhow!({ e }))
+            .context(ks_err!("Failed to encode module_info"))?;
+        let hash = digest::Sha256::hash(&encoding).to_vec();
+
+        {
+            let mut saved = ENCODED_MODULE_INFO.write().unwrap();
+            if let Some(saved_encoding) = &*saved {
+                if *saved_encoding == encoding {
+                    log::warn!(
+                        "Module info already set, ignoring repeated attempt to set same info."
+                    );
+                    return Ok(());
+                }
+                return Err(Error::Rc(ResponseCode::INVALID_ARGUMENT)).context(ks_err!(
+                    "Failed to set module info as it is already set to a different value."
+                ));
+            }
+            *saved = Some(encoding);
+        }
+
+        let kps =
+            vec![KeyParameter { tag: Tag::MODULE_HASH, value: KeyParameterValue::Blob(hash) }];
+
+        Maintenance::call_on_all_security_levels(
+            "setAdditionalAttestationInfo",
+            |dev| dev.setAdditionalAttestationInfo(&kps),
+            Some(KEYMINT_V4),
+        )
+    }
+
+    #[allow(dead_code)]
+    fn encode_module_info(module_info: Vec<ModuleInfo>) -> Result<Vec<u8>, der::Error> {
+        SetOfVec::<ModuleInfo>::from_iter(module_info.into_iter())?.to_der()
     }
 }
 

@@ -147,6 +147,9 @@ class KeyMintDevice : public aidl::android::hardware::security::keymint::BnKeyMi
                                  std::vector<uint8_t>* rootOfTrust);
     ScopedAStatus sendRootOfTrust(const std::vector<uint8_t>& rootOfTrust);
 
+    ScopedAStatus
+    setAdditionalAttestationInfo(const std::vector<KeyParameter>& additionalAttestationInfo);
+
     // These are public to allow testing code to use them directly.
     // This class should not be used publicly anyway.
     std::variant<std::vector<Certificate>, KMV1_ErrorCode>

@@ -26,6 +26,7 @@
 
 #include <future>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "DrmRkpAdapter.h"
@@ -33,10 +34,9 @@
 
 using aidl::android::hardware::drm::IDrmFactory;
 using aidl::android::hardware::security::keymint::IRemotelyProvisionedComponent;
+using aidl::android::hardware::security::keymint::RpcHardwareInfo;
 using aidl::android::hardware::security::keymint::remote_prov::jsonEncodeCsrWithBuild;
-
-using namespace cppbor;
-using namespace cppcose;
+using aidl::android::hardware::security::keymint::remote_prov::RKPVM_INSTANCE_NAME;
 
 DEFINE_string(output_format, "build+csr", "How to format the output. Defaults to 'build+csr'.");
 DEFINE_bool(self_test, true,
@@ -47,6 +47,10 @@ DEFINE_bool(allow_degenerate, true,
             "If true, self_test validation will allow degenerate DICE chains in the CSR.");
 DEFINE_string(serialno_prop, "ro.serialno",
               "The property of getting serial number. Defaults to 'ro.serialno'.");
+DEFINE_string(require_uds_certs, "",
+              "The comma-delimited names of remotely provisioned "
+              "components whose UDS certificate chains are required to be present in the CSR. "
+              "Example: avf,default,strongbox");
 
 namespace {
 
@@ -59,15 +63,15 @@ std::string getFullServiceName(const char* descriptor, const char* name) {
     return  std::string(descriptor) + "/" + name;
 }
 
-void writeOutput(const std::string instance_name, const Array& csr) {
+void writeOutput(const std::string instance_name, const cppbor::Array& csr) {
     if (FLAGS_output_format == kBinaryCsrOutput) {
         auto bytes = csr.encode();
         std::copy(bytes.begin(), bytes.end(), std::ostream_iterator<char>(std::cout));
     } else if (FLAGS_output_format == kBuildPlusCsr) {
         auto [json, error] = jsonEncodeCsrWithBuild(instance_name, csr, FLAGS_serialno_prop);
         if (!error.empty()) {
-            std::cerr << "Error JSON encoding the output: " << error;
-            exit(1);
+            std::cerr << "Error JSON encoding the output: " << error << std::endl;
+            exit(-1);
         }
         std::cout << json << std::endl;
     } else {
@@ -75,20 +79,28 @@ void writeOutput(const std::string instance_name, const Array& csr) {
         std::cerr << "Valid formats:" << std::endl;
         std::cerr << "  " << kBinaryCsrOutput << std::endl;
         std::cerr << "  " << kBuildPlusCsr << std::endl;
-        exit(1);
+        exit(-1);
     }
 }
 
-void getCsrForIRpc(const char* descriptor, const char* name, IRemotelyProvisionedComponent* irpc) {
+void getCsrForIRpc(const char* descriptor, const char* name, IRemotelyProvisionedComponent* irpc,
+                   bool requireUdsCerts) {
+    auto fullName = getFullServiceName(descriptor, name);
     // AVF RKP HAL is not always supported, so we need to check if it is supported before
     // generating the CSR.
-    if (std::string(name) == "avf" && !isRemoteProvisioningSupported(irpc)) {
-        return;
+    if (fullName == RKPVM_INSTANCE_NAME) {
+        RpcHardwareInfo hwInfo;
+        auto status = irpc->getHardwareInfo(&hwInfo);
+        if (!status.isOk()) {
+            return;
+        }
     }
-    auto [request, errMsg] = getCsr(name, irpc, FLAGS_self_test, FLAGS_allow_degenerate);
-    auto fullName = getFullServiceName(descriptor, name);
+
+    auto [request, errMsg] =
+        getCsr(name, irpc, FLAGS_self_test, FLAGS_allow_degenerate, requireUdsCerts);
     if (!request) {
-        std::cerr << "Unable to build CSR for '" << fullName << ": " << errMsg << std::endl;
+        std::cerr << "Unable to build CSR for '" << fullName << "': " << errMsg << ", exiting."
+                  << std::endl;
         exit(-1);
     }
 
@@ -97,23 +109,33 @@ void getCsrForIRpc(const char* descriptor, const char* name, IRemotelyProvisione
 
 // Callback for AServiceManager_forEachDeclaredInstance that writes out a CSR
 // for every IRemotelyProvisionedComponent.
-void getCsrForInstance(const char* name, void* /*context*/) {
+void getCsrForInstance(const char* name, void* context) {
     auto fullName = getFullServiceName(IRemotelyProvisionedComponent::descriptor, name);
-    std::future<AIBinder*> wait_for_service_func =
+    std::future<AIBinder*> waitForServiceFunc =
         std::async(std::launch::async, AServiceManager_waitForService, fullName.c_str());
-    if (wait_for_service_func.wait_for(std::chrono::seconds(10)) == std::future_status::timeout) {
-        std::cerr << "Wait for service timed out after 10 seconds: " << fullName;
+    if (waitForServiceFunc.wait_for(std::chrono::seconds(10)) == std::future_status::timeout) {
+        std::cerr << "Wait for service timed out after 10 seconds: '" << fullName << "', exiting."
+                  << std::endl;
         exit(-1);
     }
-    AIBinder* rkpAiBinder = wait_for_service_func.get();
+    AIBinder* rkpAiBinder = waitForServiceFunc.get();
     ::ndk::SpAIBinder rkp_binder(rkpAiBinder);
-    auto rkp_service = IRemotelyProvisionedComponent::fromBinder(rkp_binder);
-    if (!rkp_service) {
-        std::cerr << "Unable to get binder object for '" << fullName << "', skipping.";
+    auto rkpService = IRemotelyProvisionedComponent::fromBinder(rkp_binder);
+    if (!rkpService) {
+        std::cerr << "Unable to get binder object for '" << fullName << "', exiting." << std::endl;
         exit(-1);
     }
 
-    getCsrForIRpc(IRemotelyProvisionedComponent::descriptor, name, rkp_service.get());
+    if (context == nullptr) {
+        std::cerr << "Unable to get context for '" << fullName << "', exiting." << std::endl;
+        exit(-1);
+    }
+
+    auto requireUdsCertsRpcNames = static_cast<std::unordered_set<std::string>*>(context);
+    auto requireUdsCerts = requireUdsCertsRpcNames->count(name) != 0;
+    requireUdsCertsRpcNames->erase(name);
+    getCsrForIRpc(IRemotelyProvisionedComponent::descriptor, name, rkpService.get(),
+                  requireUdsCerts);
 }
 
 }  // namespace
@@ -121,12 +143,21 @@ void getCsrForInstance(const char* name, void* /*context*/) {
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/true);
 
-    AServiceManager_forEachDeclaredInstance(IRemotelyProvisionedComponent::descriptor,
-                                            /*context=*/nullptr, getCsrForInstance);
+    auto requireUdsCertsRpcNames = parseCommaDelimited(FLAGS_require_uds_certs);
 
-    // Append drm csr's
-    for (auto const& e : android::mediadrm::getDrmRemotelyProvisionedComponents()) {
-        getCsrForIRpc(IDrmFactory::descriptor, e.first.c_str(), e.second.get());
+    AServiceManager_forEachDeclaredInstance(IRemotelyProvisionedComponent::descriptor,
+                                            &requireUdsCertsRpcNames, getCsrForInstance);
+
+    // Append drm CSRs
+    for (auto const& [name, irpc] : android::mediadrm::getDrmRemotelyProvisionedComponents()) {
+        auto requireUdsCerts = requireUdsCertsRpcNames.count(name) != 0;
+        requireUdsCertsRpcNames.erase(name);
+        getCsrForIRpc(IDrmFactory::descriptor, name.c_str(), irpc.get(), requireUdsCerts);
+    }
+
+    for (auto const& rpcName : requireUdsCertsRpcNames) {
+        std::cerr << "WARNING: You requested to enforce the presence of UDS Certs for '" << rpcName
+                  << "', but no Remotely Provisioned Component had that name." << std::endl;
     }
 
     return 0;
