@@ -69,11 +69,11 @@ fn get_socket(path: &Path) -> Result<UnixListener> {
 }
 
 fn setup() -> Result<(ConditionerBuilder, UnixListener)> {
+    configure_logging()?;
+    let cli = Cli::try_parse()?;
     // SAFETY: nobody has taken ownership of the inherited FDs yet.
     unsafe { rustutils::inherited_fd::init_once() }
         .context("In setup, failed to own inherited FDs")?;
-    configure_logging()?;
-    let cli = Cli::try_parse()?;
     // SAFETY: Nothing else sets the signal handler, so either it was set here or it is the default.
     unsafe { signal::signal(signal::Signal::SIGPIPE, signal::SigHandler::SigIgn) }
         .context("In setup, setting SIGPIPE to SIG_IGN")?;

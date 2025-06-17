@@ -46,12 +46,14 @@ rust_defaults {
         "android.security.maintenance-rust",
         "android.security.metrics-rust",
         "android.security.rkp_aidl-rust",
+        "apex_aidl_interface-rust",
         "libaconfig_android_hardware_biometrics_rust",
         "libandroid_security_flags_rust",
         "libanyhow",
         "libbinder_rs",
         "libbssl_crypto",
         "libder",
+        "libhex",
         "libkeystore2_aaid-rust",
         "libkeystore2_apc_compat-rust",
         "libkeystore2_crypto_rust",
@@ -111,7 +113,6 @@ rust_test {
     defaults: ["libkeystore2_defaults"],
     rustlibs: [
         "libandroid_logger",
-        "libhex",
         "libkeystore2_test_utils",
         "libkeystore2_with_test_utils",
         "liblibsqlite3_sys",
@@ -189,6 +190,11 @@ java_aconfig_library {
     name: "keystore2_flags_java-framework",
     aconfig_declarations: "keystore2_flags",
     defaults: ["framework-minus-apex-aconfig-java-defaults"],
+}
+
+cc_aconfig_library {
+    name: "libkeystore2_flags_cc",
+    aconfig_declarations: "keystore2_flags",
 }
 
 rust_aconfig_library {

@@ -19,7 +19,6 @@ use crate::keystore2_client_test_utils::{
     verify_certificate_serial_num, verify_certificate_subject_name, SAMPLE_PLAIN_TEXT,
 };
 use crate::{require_keymint, skip_test_if_no_app_attest_key_feature};
-use aconfig_android_hardware_biometrics_rust;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, Digest::Digest, EcCurve::EcCurve,
     ErrorCode::ErrorCode, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
@@ -27,6 +26,7 @@ use android_hardware_security_keymint::aidl::android::hardware::security::keymin
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
+    KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue,
 };
 use android_hardware_security_secureclock::aidl::android::hardware::security::secureclock::{
     Timestamp::Timestamp
@@ -35,6 +35,8 @@ use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, KeyMetadata::KeyMetadata,
     ResponseCode::ResponseCode,
 };
+use bssl_crypto::digest;
+use keystore_attestation::{AttestationExtension, ATTESTATION_EXTENSION_OID};
 use keystore2_test_utils::ffi_test_utils::get_value_from_attest_record;
 use keystore2_test_utils::{
     authorizations, get_keystore_auth_service, key_generations,
@@ -43,6 +45,7 @@ use keystore2_test_utils::{
 use openssl::bn::{BigNum, MsbOption};
 use openssl::x509::X509NameBuilder;
 use std::time::SystemTime;
+use x509_cert::{certificate::Certificate, der::Decode};
 
 fn gen_key_including_unique_id(sl: &SecLevel, alias: &str) -> Option<Vec<u8>> {
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -518,6 +521,10 @@ fn keystore2_gen_key_auth_max_uses_per_boot() {
 #[test]
 fn keystore2_gen_key_auth_usage_count_limit() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() {
+        // `USAGE_COUNT_LIMIT` is supported from KeyMint1.0
+        return;
+    }
     const MAX_USES_COUNT: i32 = 3;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -542,6 +549,10 @@ fn keystore2_gen_key_auth_usage_count_limit() {
 #[test]
 fn keystore2_gen_key_auth_usage_count_limit_one() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() {
+        // `USAGE_COUNT_LIMIT` is supported from KeyMint1.0
+        return;
+    }
     const MAX_USES_COUNT: i32 = 1;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -565,6 +576,10 @@ fn keystore2_gen_key_auth_usage_count_limit_one() {
 #[test]
 fn keystore2_gen_non_attested_key_auth_usage_count_limit() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() {
+        // `USAGE_COUNT_LIMIT` is supported from KeyMint1.0
+        return;
+    }
     const MAX_USES_COUNT: i32 = 2;
 
     let gen_params = authorizations::AuthSetBuilder::new()
@@ -627,6 +642,12 @@ fn keystore2_gen_key_auth_creation_date_time_test_fail_with_invalid_arg_error() 
 #[test]
 fn keystore2_gen_key_auth_include_unique_id_success() {
     let sl = SecLevel::tee();
+    if sl.is_keymaster() {
+        // b/387208956 - Some older devices with Keymaster implementations fail to generate an
+        // attestation key with `INCLUDE_UNIQUE_ID`, but this was not previously tested. Skip this
+        // test on devices with Keymaster implementation.
+        return;
+    }
 
     let alias_first = "ks_test_auth_tags_test_1";
     if let Some(unique_id_first) = gen_key_including_unique_id(&sl, alias_first) {
@@ -921,25 +942,7 @@ fn add_hardware_token(auth_type: HardwareAuthenticatorType) {
 }
 
 #[test]
-fn keystore2_flagged_off_get_last_auth_password_permission_denied() {
-    if aconfig_android_hardware_biometrics_rust::last_authentication_time() {
-        return;
-    }
-
-    let keystore_auth = get_keystore_auth_service();
-
-    let result = keystore_auth.getLastAuthTime(0, &[HardwareAuthenticatorType::PASSWORD]);
-
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().service_specific_error(), ResponseCode::PERMISSION_DENIED.0);
-}
-
-#[test]
-fn keystore2_flagged_on_get_last_auth_password_success() {
-    if !aconfig_android_hardware_biometrics_rust::last_authentication_time() {
-        return;
-    }
-
+fn keystore2_get_last_auth_password_success() {
     let keystore_auth = get_keystore_auth_service();
 
     add_hardware_token(HardwareAuthenticatorType::PASSWORD);
@@ -947,11 +950,7 @@ fn keystore2_flagged_on_get_last_auth_password_success() {
 }
 
 #[test]
-fn keystore2_flagged_on_get_last_auth_fingerprint_success() {
-    if !aconfig_android_hardware_biometrics_rust::last_authentication_time() {
-        return;
-    }
-
+fn keystore2_get_last_auth_fingerprint_success() {
     let keystore_auth = get_keystore_auth_service();
 
     add_hardware_token(HardwareAuthenticatorType::FINGERPRINT);
@@ -995,4 +994,72 @@ fn keystore2_gen_key_auth_serial_number_subject_test_success() {
     );
     verify_certificate_serial_num(key_metadata.certificate.as_ref().unwrap(), &serial);
     delete_app_key(&sl.keystore2, alias).unwrap();
+}
+
+#[test]
+fn test_supplementary_attestation_info() {
+    if !keystore2_flags::attest_modules() {
+        // Module info is only populated if the flag is set.
+        return;
+    }
+
+    // Test should not run before MODULE_HASH supplementary info is populated.
+    assert!(rustutils::system_properties::read_bool("keystore.module_hash.sent", false)
+        .unwrap_or(false));
+
+    let sl = SecLevel::tee();
+
+    // Retrieve the input value that gets hashed into the attestation.
+    let module_info = sl
+        .keystore2
+        .getSupplementaryAttestationInfo(Tag::MODULE_HASH)
+        .expect("supplementary info for MODULE_HASH should be populated during startup");
+    let again = sl.keystore2.getSupplementaryAttestationInfo(Tag::MODULE_HASH).unwrap();
+    assert_eq!(again, module_info);
+    let want_hash = digest::Sha256::hash(&module_info).to_vec();
+
+    // Requesting other types of information should fail.
+    let result = key_generations::map_ks_error(
+        sl.keystore2.getSupplementaryAttestationInfo(Tag::BLOCK_MODE),
+    );
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Error::Rc(ResponseCode::INVALID_ARGUMENT));
+
+    if sl.get_keymint_version() < 400 {
+        // Module hash will only be populated in KeyMint if the underlying device is KeyMint V4+.
+        return;
+    }
+
+    // Generate an attestation.
+    let alias = "ks_module_info_test";
+    let params = authorizations::AuthSetBuilder::new()
+        .no_auth_required()
+        .algorithm(Algorithm::EC)
+        .purpose(KeyPurpose::SIGN)
+        .purpose(KeyPurpose::VERIFY)
+        .digest(Digest::SHA_2_256)
+        .ec_curve(EcCurve::P_256)
+        .attestation_challenge(b"froop".to_vec());
+    let metadata = key_generations::generate_key(&sl, &params, alias)
+        .expect("failed key generation")
+        .expect("no metadata");
+    let cert_data = metadata.certificate.as_ref().unwrap();
+    let cert = Certificate::from_der(cert_data).expect("failed to parse X509 cert");
+    let exts = cert.tbs_certificate.extensions.expect("no X.509 extensions");
+    let ext = exts
+        .iter()
+        .find(|ext| ext.extn_id == ATTESTATION_EXTENSION_OID)
+        .expect("no attestation extension");
+    let ext = AttestationExtension::from_der(ext.extn_value.as_bytes())
+        .expect("failed to parse attestation extension");
+
+    // Find the attested module hash value.
+    let mut got_hash = None;
+    for auth in ext.sw_enforced.auths.into_owned().iter() {
+        if let KeyParameter { tag: Tag::MODULE_HASH, value: KeyParameterValue::Blob(hash) } = auth {
+            got_hash = Some(hash.clone());
+        }
+    }
+    let got_hash = got_hash.expect("no MODULE_HASH in sw_enforced");
+    assert_eq!(hex::encode(got_hash), hex::encode(want_hash));
 }

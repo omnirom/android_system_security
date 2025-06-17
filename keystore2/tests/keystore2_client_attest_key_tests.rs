@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    app_attest_key_feature_exists, device_id_attestation_feature_exists, get_attest_id_value,
+    app_attest_key_feature_exists, device_id_attestation_check_acceptable_error,
+    device_id_attestation_feature_exists, get_attest_id_value,
     is_second_imei_id_attestation_required, skip_device_id_attest_tests,
 };
 use crate::{
@@ -558,7 +559,7 @@ fn keystore2_attest_rsa_attestation_id() {
 }
 
 /// Try to generate an attested key with attestation of invalid device's identifiers. Test should
-/// fail with error response code `CANNOT_ATTEST_IDS`.
+/// fail to generate a key with proper error code.
 #[test]
 fn keystore2_attest_key_fails_with_invalid_attestation_id() {
     skip_test_if_no_device_id_attestation_feature!();
@@ -602,7 +603,7 @@ fn keystore2_attest_key_fails_with_invalid_attestation_id() {
         ));
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
+        device_id_attestation_check_acceptable_error(attest_id, result.unwrap_err());
     }
 }
 

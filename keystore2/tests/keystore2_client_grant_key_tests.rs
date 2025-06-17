@@ -18,6 +18,7 @@ use crate::keystore2_client_test_utils::{
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Digest::Digest, KeyPurpose::KeyPurpose,
 };
+use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::IKeystoreMaintenance;
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
     KeyEntryResponse::KeyEntryResponse, KeyPermission::KeyPermission, ResponseCode::ResponseCode,
@@ -29,6 +30,8 @@ use keystore2_test_utils::{
 };
 use nix::unistd::getuid;
 use rustutils::users::AID_USER_OFFSET;
+
+static USER_MANAGER_SERVICE_NAME: &str = "android.security.maintenance";
 
 /// Produce a [`KeyDescriptor`] for a granted key.
 fn granted_key_descriptor(nspace: i64) -> KeyDescriptor {
@@ -86,6 +89,10 @@ fn sign_with_granted_key(grant_key_nspace: i64) -> Result<(), Error> {
     );
 
     Ok(())
+}
+
+fn get_maintenance() -> binder::Strong<dyn IKeystoreMaintenance> {
+    binder::get_interface(USER_MANAGER_SERVICE_NAME).unwrap()
 }
 
 /// Try to grant an SELINUX key with permission that does not map to any of the `KeyPermission`
@@ -598,6 +605,223 @@ fn grant_fails_with_non_existing_selinux_key() {
     ));
     assert!(result.is_err());
     assert_eq!(Error::Rc(ResponseCode::KEY_NOT_FOUND), result.unwrap_err());
+}
+
+/// Grant a key to a UID (user ID A + app B) then uninstall user ID A. Initialize a new user with
+/// the same user ID as the now-removed user. Check that app B for the new user can't load the key.
+#[test]
+fn grant_removed_when_grantee_user_id_removed() {
+    const GRANTOR_USER_ID: u32 = 97;
+    const GRANTOR_APPLICATION_ID: u32 = 10003;
+    static GRANTOR_UID: u32 = GRANTOR_USER_ID * AID_USER_OFFSET + GRANTOR_APPLICATION_ID;
+    static GRANTOR_GID: u32 = GRANTOR_UID;
+
+    const GRANTEE_USER_ID: u32 = 99;
+    const GRANTEE_APPLICATION_ID: u32 = 10001;
+    static GRANTEE_UID: u32 = GRANTEE_USER_ID * AID_USER_OFFSET + GRANTEE_APPLICATION_ID;
+    static GRANTEE_GID: u32 = GRANTEE_UID;
+
+    // Add a new user.
+    let create_grantee_user_id_fn = || {
+        let maint = get_maintenance();
+        maint.onUserAdded(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to add user");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(create_grantee_user_id_fn) };
+
+    // Child function to generate a key and grant it to GRANTEE_UID with `GET_INFO` permission.
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let access_vector = KeyPermission::GET_INFO.0;
+        let alias = format!("ks_grant_single_{}", getuid());
+        let mut grant_keys = generate_ec_key_and_grant_to_users(
+            &sl,
+            Some(alias),
+            vec![GRANTEE_UID.try_into().unwrap()],
+            access_vector,
+        )
+        .unwrap();
+
+        grant_keys.remove(0)
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    let grant_key_nspace = unsafe { run_as::run_as_app(GRANTOR_UID, GRANTOR_GID, grantor_fn) };
+
+    // Child function for the grantee context: can load the granted key.
+    let grantee_fn = move || {
+        let keystore2 = get_keystore_service();
+        let rsp = get_granted_key(&keystore2, grant_key_nspace).expect("failed to get granted key");
+
+        // Return the underlying key ID to simulate an ID leak.
+        assert_eq!(rsp.metadata.key.domain, Domain::KEY_ID);
+        rsp.metadata.key.nspace
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    let key_id = unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, grantee_fn) };
+
+    // Remove the grantee user and create a new user with the same user ID.
+    let overwrite_grantee_user_id_fn = || {
+        let maint = get_maintenance();
+        maint.onUserRemoved(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to remove user");
+        maint.onUserAdded(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to add user");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(overwrite_grantee_user_id_fn) };
+
+    // Second context identified by <uid, grant_nspace> (where uid is the same because the
+    // now-deleted and newly-created grantee users have the same user ID) does not have access to
+    // the above granted key.
+    let new_grantee_fn = move || {
+        // Check that the key cannot be accessed via grant (i.e. KeyDescriptor with Domain::GRANT).
+        let keystore2 = get_keystore_service();
+        let result = get_granted_key(&keystore2, grant_key_nspace);
+        assert!(result.is_err());
+        assert_eq!(Error::Rc(ResponseCode::KEY_NOT_FOUND), result.unwrap_err());
+
+        // Check that the key also cannot be accessed via key ID (i.e. KeyDescriptor with
+        // Domain::KEY_ID) if the second context somehow gets a hold of it.
+        let result = map_ks_error(keystore2.getKeyEntry(&KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace: key_id,
+            alias: None,
+            blob: None,
+        }));
+        assert!(result.is_err());
+        assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, new_grantee_fn) };
+
+    // Clean up: remove grantee user.
+    let remove_grantee_user_id_fn = || {
+        let maint = get_maintenance();
+        maint.onUserRemoved(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to remove user");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(remove_grantee_user_id_fn) };
+}
+
+/// Grant a key to a UID (user ID A + app B) then clear the namespace for user ID A + app B. Check
+/// that the key can't be loaded by that UID (which would be the UID used if another app were to be
+/// installed for user ID A with the same application ID B).
+#[test]
+fn grant_removed_when_grantee_app_uninstalled() {
+    const GRANTOR_USER_ID: u32 = 97;
+    const GRANTOR_APPLICATION_ID: u32 = 10003;
+    static GRANTOR_UID: u32 = GRANTOR_USER_ID * AID_USER_OFFSET + GRANTOR_APPLICATION_ID;
+    static GRANTOR_GID: u32 = GRANTOR_UID;
+
+    const GRANTEE_USER_ID: u32 = 99;
+    const GRANTEE_APPLICATION_ID: u32 = 10001;
+    static GRANTEE_UID: u32 = GRANTEE_USER_ID * AID_USER_OFFSET + GRANTEE_APPLICATION_ID;
+    static GRANTEE_GID: u32 = GRANTEE_UID;
+
+    // Add a new user.
+    let create_grantee_user_id_fn = || {
+        let maint = get_maintenance();
+        maint.onUserAdded(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to add user");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(create_grantee_user_id_fn) };
+
+    // Child function to generate a key and grant it to GRANTEE_UID with `GET_INFO` permission.
+    let grantor_fn = || {
+        let sl = SecLevel::tee();
+        let access_vector = KeyPermission::GET_INFO.0;
+        let alias = format!("ks_grant_single_{}", getuid());
+        let mut grant_keys = generate_ec_key_and_grant_to_users(
+            &sl,
+            Some(alias),
+            vec![GRANTEE_UID.try_into().unwrap()],
+            access_vector,
+        )
+        .unwrap();
+
+        grant_keys.remove(0)
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    let grant_key_nspace = unsafe { run_as::run_as_app(GRANTOR_UID, GRANTOR_GID, grantor_fn) };
+
+    // Child function for the grantee context: can load the granted key.
+    let grantee_fn = move || {
+        let keystore2 = get_keystore_service();
+        let rsp = get_granted_key(&keystore2, grant_key_nspace).expect("failed to get granted key");
+
+        // Return the underlying key ID to simulate an ID leak.
+        assert_eq!(rsp.metadata.key.domain, Domain::KEY_ID);
+        rsp.metadata.key.nspace
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    let key_id = unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, grantee_fn) };
+
+    // Clear the app's namespace, which is what happens when an app is uninstalled. Exercising the
+    // full app uninstallation "flow" isn't possible from a Keystore VTS test since we'd need to
+    // exercise the Java code that calls into the Keystore service. So, we can only test the
+    // entrypoint that we know gets triggered during app uninstallation based on the code's control
+    // flow.
+    let clear_grantee_uid_namespace_fn = || {
+        let maint = get_maintenance();
+        maint
+            .clearNamespace(Domain::APP, GRANTEE_UID.try_into().unwrap())
+            .expect("failed to clear namespace");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(clear_grantee_uid_namespace_fn) };
+
+    // The same context identified by <uid, grant_nspace> not longer has access to the above granted
+    // key. This would be the context if a new app were installed and assigned the same app ID.
+    let new_grantee_fn = move || {
+        // Check that the key cannot be accessed via grant (i.e. KeyDescriptor with Domain::GRANT).
+        let keystore2 = get_keystore_service();
+        let result = get_granted_key(&keystore2, grant_key_nspace);
+        assert!(result.is_err());
+        assert_eq!(Error::Rc(ResponseCode::KEY_NOT_FOUND), result.unwrap_err());
+
+        // Check that the key also cannot be accessed via key ID (i.e. KeyDescriptor with
+        // Domain::KEY_ID) if the second context somehow gets a hold of it.
+        let result = map_ks_error(keystore2.getKeyEntry(&KeyDescriptor {
+            domain: Domain::KEY_ID,
+            nspace: key_id,
+            alias: None,
+            blob: None,
+        }));
+        assert!(result.is_err());
+        assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_app(GRANTEE_UID, GRANTEE_GID, new_grantee_fn) };
+
+    // Clean up: remove grantee user.
+    let remove_grantee_user_id_fn = || {
+        let maint = get_maintenance();
+        maint.onUserRemoved(GRANTEE_USER_ID.try_into().unwrap()).expect("failed to remove user");
+    };
+
+    // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
+    // `--test-threads=1`), and nothing yet done with binder on the main thread.
+    unsafe { run_as::run_as_root(remove_grantee_user_id_fn) };
 }
 
 /// Grant an APP key to the user and immediately ungrant the granted key. In grantee context try to load

@@ -76,6 +76,11 @@ fn main() {
     // Write/update keystore.crash_count system property.
     metrics_store::update_keystore_crash_sysprop();
 
+    // Send KeyMint module information for attestations.
+    // Note that the information should be sent before code from modules starts running.
+    // (This is guaranteed by waiting for `keystore.module_hash.sent` == true during device boot.)
+    Maintenance::check_send_module_info();
+
     // Keystore 2.0 cannot change to the database directory (typically /data/misc/keystore) on
     // startup as Keystore 1.0 did because Keystore 2.0 is intended to run much earlier than
     // Keystore 1.0. Instead we set a global variable to the database path.
@@ -93,6 +98,7 @@ fn main() {
 
     ENFORCEMENTS.install_confirmation_token_receiver(confirmation_token_receiver);
 
+    std::thread::spawn(keystore2::globals::await_boot_completed);
     entropy::register_feeder();
     shared_secret_negotiation::perform_shared_secret_negotiation();
 

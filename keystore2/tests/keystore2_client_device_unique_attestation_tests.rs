@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    delete_app_key, get_attest_id_value, is_second_imei_id_attestation_required,
-    perform_sample_asym_sign_verify_op, skip_device_unique_attestation_tests,
+    delete_app_key, device_id_attestation_check_acceptable_error, get_attest_id_value,
+    is_second_imei_id_attestation_required, perform_sample_asym_sign_verify_op,
+    skip_device_unique_attestation_tests,
 };
 use crate::require_keymint;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
@@ -254,7 +255,7 @@ fn keystore2_gen_rsa_key_device_unique_attest_with_strongbox_sec_level_test_succ
 }
 
 /// Try to generate a device unique attested key with attestation of invalid device's identifiers.
-/// Test should fail with error response code `CANNOT_ATTEST_IDS`.
+/// Test should fail to generate a key with proper error code.
 #[test]
 fn keystore2_device_unique_attest_key_fails_with_invalid_attestation_id() {
     let Some(sl) = SecLevel::strongbox() else { return };
@@ -288,7 +289,7 @@ fn keystore2_device_unique_attest_key_fails_with_invalid_attestation_id() {
         let result =
             key_generations::map_ks_error(key_generations::generate_key(&sl, &gen_params, alias));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
+        device_id_attestation_check_acceptable_error(attest_id, result.unwrap_err());
     }
 }
 

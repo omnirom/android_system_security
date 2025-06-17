@@ -536,13 +536,27 @@ fn check_common_auths(
             value: KeyParameterValue::Integer(get_os_version().try_into().unwrap())
         }
     ));
-    assert!(check_key_param(
-        authorizations,
-        &KeyParameter {
-            tag: Tag::OS_PATCHLEVEL,
-            value: KeyParameterValue::Integer(get_os_patchlevel().try_into().unwrap())
-        }
-    ));
+    if is_gsi() && sl.is_keymaster() {
+        // The expected value of TAG::OS_PATCHLEVEL should match the system's reported
+        // OS patch level (obtained via get_os_patchlevel()). However, booting a Generic System
+        // Image (GSI) with a newer patch level is permitted. Therefore, the generated key's
+        // TAG::OS_PATCHLEVEL may be less than or equal to the current system's OS patch level.
+        assert!(authorizations.iter().map(|auth| &auth.keyParameter).any(|key_param| key_param
+            .tag
+            == Tag::OS_PATCHLEVEL
+            && key_param.value
+                <= KeyParameterValue::Integer(get_os_patchlevel().try_into().unwrap())));
+    } else {
+        // The KeyMint spec required that the patch-levels match that of the running system, even
+        // under GSI.
+        assert!(check_key_param(
+            authorizations,
+            &KeyParameter {
+                tag: Tag::OS_PATCHLEVEL,
+                value: KeyParameterValue::Integer(get_os_patchlevel().try_into().unwrap())
+            }
+        ));
+    }
 
     assert!(check_key_param(
         authorizations,

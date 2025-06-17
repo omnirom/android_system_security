@@ -317,7 +317,7 @@ impl OwnedECPoint {
     }
 }
 
-impl<'a> BorrowedECPoint<'a> {
+impl BorrowedECPoint<'_> {
     /// Get the wrapped EC_POINT object.
     pub fn get_point(&self) -> &EC_POINT {
         // Safety: We only create BorrowedECPoint objects for valid EC_POINTs.

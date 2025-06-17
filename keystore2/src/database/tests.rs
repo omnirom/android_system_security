@@ -2090,6 +2090,108 @@ fn test_unbind_keys_for_user_removes_superkeys() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_unbind_keys_for_user_removes_received_grants() -> Result<()> {
+    let mut db = new_test_db()?;
+    const USER_ID_1: u32 = 1;
+    const USER_ID_2: u32 = 2;
+    const APPLICATION_ID_1: u32 = 11;
+    const APPLICATION_ID_2: u32 = 22;
+    const UID_1_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_1;
+    const UID_2_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_2;
+    const UID_1_FOR_USER_ID_2: u32 = USER_ID_2 * AID_USER_OFFSET + APPLICATION_ID_1;
+
+    // Pretend two application IDs for user ID 1 were granted access to 1 key each and one
+    // application ID for user ID 2 was granted access to 1 key.
+    db.conn.execute(
+        &format!(
+            "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                    VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222),
+                           (2, {UID_1_FOR_USER_ID_2}, 333, 444),
+                           (3, {UID_2_FOR_USER_ID_1}, 555, 666);"
+        ),
+        [],
+    )?;
+    db.unbind_keys_for_user(USER_ID_1)?;
+
+    let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
+    let mut rows = stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+    // The rows for the user ID 1 grantees (UID_1_FOR_USER_ID_1 and UID_2_FOR_USER_ID_1) should be
+    // deleted and the row for the user ID 2 grantee (UID_1_FOR_USER_ID_2) should be untouched.
+    let r = rows.next().unwrap().unwrap();
+    assert_eq!(r, (2, UID_1_FOR_USER_ID_2));
+    assert!(rows.next().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn test_unbind_keys_for_namespace_removes_received_grants() -> Result<()> {
+    const USER_ID_1: u32 = 1;
+    const APPLICATION_ID_1: u32 = 11;
+    const APPLICATION_ID_2: u32 = 22;
+    const UID_1_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_1;
+    const UID_2_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_2;
+
+    // Check that grants are removed for Domain::APP.
+    {
+        let mut db = new_test_db()?;
+
+        // Pretend two application IDs for user ID 1 were granted access to 1 key each.
+        db.conn.execute(
+            &format!(
+                "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222), (2, {UID_2_FOR_USER_ID_1}, 333, 444);"
+            ),
+            [],
+        )?;
+        // Keystore uses the UID as the namespace for Domain::APP keys.
+        db.unbind_keys_for_namespace(Domain::APP, UID_1_FOR_USER_ID_1.into())?;
+
+        let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
+        let mut rows =
+            stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        // The row for the grant to the namespace that was cleared (UID_1_FOR_USER_ID_1) should be
+        // deleted. The other row should be untouched.
+        let r = rows.next().unwrap().unwrap();
+        assert_eq!(r, (2, UID_2_FOR_USER_ID_1));
+        assert!(rows.next().is_none());
+    }
+
+    // Check that grants aren't removed for Domain::SELINUX.
+    {
+        let mut db = new_test_db()?;
+
+        // Pretend two application IDs for user ID 1 were granted access to 1 key each.
+        db.conn.execute(
+            &format!(
+                "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
+                VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222), (2, {UID_2_FOR_USER_ID_1}, 333, 444);"
+            ),
+            [],
+        )?;
+        // Keystore uses the UID as the namespace for Domain::APP keys. Here we're passing in
+        // Domain::SELINUX, but still pass the UID as the "namespace" argument to make sure the
+        // code's logic is correct.
+        db.unbind_keys_for_namespace(Domain::SELINUX, UID_1_FOR_USER_ID_1.into())?;
+
+        let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
+        let mut rows =
+            stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        // Both rows should still be present.
+        let r = rows.next().unwrap().unwrap();
+        assert_eq!(r, (1, UID_1_FOR_USER_ID_1));
+        let r = rows.next().unwrap().unwrap();
+        assert_eq!(r, (2, UID_2_FOR_USER_ID_1));
+        assert!(rows.next().is_none());
+    }
+
+    Ok(())
+}
+
 fn app_key_exists(db: &mut KeystoreDB, nspace: i64, alias: &str) -> Result<bool> {
     db.key_exists(Domain::APP, nspace, alias, KeyType::Client)
 }

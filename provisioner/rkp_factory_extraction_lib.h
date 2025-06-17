@@ -33,6 +33,18 @@ std::unordered_set<std::string> parseCommaDelimited(const std::string& input);
 // Challenge size must be between 32 and 64 bytes inclusive.
 constexpr size_t kChallengeSize = 64;
 
+// How CSRs should be validated when the rkp_factory_extraction_tool's "self_test"
+// flag is set to "true".
+struct CsrValidationConfig {
+    // Names of IRemotelyProvisionedComponent instances for which degenerate DICE
+    // chains are allowed.
+    std::unordered_set<std::string>* allow_degenerate_irpc_names;
+
+    // Names of IRemotelyProvisionedComponent instances for which UDS certificate
+    // chains are required to be present in the CSR.
+    std::unordered_set<std::string>* require_uds_certs_irpc_names;
+};
+
 // Contains a the result of an operation that should return cborData on success.
 // Returns an an error message and null cborData on error.
 template <typename T> struct CborResult {

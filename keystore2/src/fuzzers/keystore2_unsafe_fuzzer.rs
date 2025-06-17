@@ -26,7 +26,7 @@ use keystore2_crypto::{
     hmac_sha256, parse_subject_from_certificate, Password, ZVec,
 };
 use keystore2_hal_names::get_hidl_instances;
-use keystore2_selinux::{check_access, getpidcon, setcon, Backend, Context, KeystoreKeyBackend};
+use keystore2_selinux::{check_access, setcon, Backend, Context, KeystoreKeyBackend};
 use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use std::{ffi::CString, sync::Arc};
 
@@ -107,9 +107,6 @@ enum FuzzCommand<'a> {
     },
     Backend {
         namespace: &'a str,
-    },
-    GetPidCon {
-        pid: i32,
     },
     CheckAccess {
         source: &'a [u8],
@@ -215,9 +212,6 @@ fuzz_target!(|commands: Vec<FuzzCommand>| {
                 if let Ok(backend) = backend {
                     let _res = backend.lookup(namespace);
                 }
-            }
-            FuzzCommand::GetPidCon { pid } => {
-                let _res = getpidcon(pid);
             }
             FuzzCommand::CheckAccess { source, target, tclass, perm } => {
                 let source = get_valid_cstring_data(source);

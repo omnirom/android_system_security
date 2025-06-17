@@ -21,7 +21,7 @@ use std::{env::temp_dir, ops::Deref};
 
 use android_system_keystore2::aidl::android::system::keystore2::{
     IKeystoreService::IKeystoreService,
-    IKeystoreSecurityLevel::IKeystoreSecurityLevel,
+    IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, SecurityLevel::SecurityLevel,
@@ -191,6 +191,20 @@ impl SecLevel {
             km.getInterfaceVersion().unwrap()
         } else {
             0
+        }
+    }
+
+    /// Delete a key.
+    pub fn delete_key(&self, key: &KeyDescriptor) -> binder::Result<()> {
+        match self.binder.deleteKey(key) {
+            Ok(()) => Ok(()),
+            Err(s)
+                if s.exception_code() == binder::ExceptionCode::SERVICE_SPECIFIC
+                    && s.service_specific_error() == ErrorCode::UNIMPLEMENTED.0 =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
     }
 }

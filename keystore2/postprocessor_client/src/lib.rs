@@ -77,7 +77,7 @@ pub fn process_certificate_chain(
             ]
         }
         Err(err) => {
-            error!("Failed to replace certificates ({err:#?}), falling back to original chain.");
+            warn!("Failed to replace certificates ({err:#?}), falling back to original chain.");
             certificates.push(Certificate { encodedCertificate: attestation_certs });
             certificates
         }

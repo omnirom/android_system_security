@@ -100,7 +100,7 @@ fn keystore2_delete_key_blob_success() {
     )
     .unwrap();
 
-    let result = sl.binder.deleteKey(&key_metadata.key);
+    let result = sl.delete_key(&key_metadata.key);
     assert!(result.is_ok());
 }
 
@@ -110,7 +110,7 @@ fn keystore2_delete_key_blob_success() {
 fn keystore2_delete_key_fails_with_missing_key_blob() {
     let sl = SecLevel::tee();
 
-    let result = key_generations::map_ks_error(sl.binder.deleteKey(&KeyDescriptor {
+    let result = key_generations::map_ks_error(sl.delete_key(&KeyDescriptor {
         domain: Domain::BLOB,
         nspace: key_generations::SELINUX_SHELL_NAMESPACE,
         alias: None,
@@ -132,7 +132,7 @@ fn keystore2_delete_key_blob_fail() {
         key_generations::generate_ec_p256_signing_key(&sl, Domain::APP, -1, Some(alias), None)
             .unwrap();
 
-    let result = key_generations::map_ks_error(sl.binder.deleteKey(&key_metadata.key));
+    let result = key_generations::map_ks_error(sl.delete_key(&key_metadata.key));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_ARGUMENT), result.unwrap_err());
 }

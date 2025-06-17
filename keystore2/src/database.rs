@@ -1163,14 +1163,6 @@ impl KeystoreDB {
         let mut persistent_path_str = "file:".to_owned();
         persistent_path_str.push_str(&persistent_path.to_string_lossy());
 
-        // Connect to database in specific mode
-        let persistent_path_mode = if keystore2_flags::wal_db_journalmode_v3() {
-            "?journal_mode=WAL".to_owned()
-        } else {
-            "?journal_mode=DELETE".to_owned()
-        };
-        persistent_path_str.push_str(&persistent_path_mode);
-
         Ok(persistent_path_str)
     }
 
@@ -2437,16 +2429,31 @@ impl KeystoreDB {
         tx.execute("DELETE FROM persistent.keyparameter WHERE keyentryid = ?;", params![key_id])
             .context("Trying to delete keyparameters.")?;
         tx.execute("DELETE FROM persistent.grant WHERE keyentryid = ?;", params![key_id])
-            .context("Trying to delete grants.")?;
+            .context("Trying to delete grants to other apps.")?;
         // The associated blobentry rows are not immediately deleted when the owning keyentry is
         // removed, because a KeyMint `deleteKey()` invocation is needed (specifically for the
-        // `KEY_BLOB`).  Mark the affected rows with `state=Orphaned` so a subsequent garbage
-        // collection can do this.
+        // `KEY_BLOB`).  That should not be done from within the database transaction.  Also, calls
+        // to `deleteKey()` need to be delayed until the boot has completed, to avoid making
+        // permanent changes during an OTA before the point of no return.  Mark the affected rows
+        // with `state=Orphaned` so a subsequent garbage collection can do the `deleteKey()`.
         tx.execute(
             "UPDATE persistent.blobentry SET state = ? WHERE keyentryid = ?",
             params![BlobState::Orphaned, key_id],
         )
         .context("Trying to mark blobentrys as superseded")?;
+        Ok(updated != 0)
+    }
+
+    fn delete_received_grants(tx: &Transaction, user_id: u32) -> Result<bool> {
+        let updated = tx
+            .execute(
+                &format!("DELETE FROM persistent.grant WHERE cast ( (grantee/{AID_USER_OFFSET}) as int) = ?;"),
+                params![user_id],
+            )
+            .context(format!(
+                "Trying to delete grants received by user ID {:?} from other apps.",
+                user_id
+            ))?;
         Ok(updated != 0)
     }
 
@@ -2521,7 +2528,19 @@ impl KeystoreDB {
                 );",
                 params![domain.0, namespace, KeyType::Client],
             )
-            .context("Trying to delete grants.")?;
+            .context(format!(
+                "Trying to delete grants issued for keys in domain {:?} and namespace {:?}.",
+                domain.0, namespace
+            ))?;
+            if domain == Domain::APP {
+                // Keystore uses the UID instead of the namespace argument for Domain::APP, so we
+                // just need to delete rows where grantee == namespace.
+                tx.execute("DELETE FROM persistent.grant WHERE grantee = ?;", params![namespace])
+                    .context(format!(
+                    "Trying to delete received grants for domain {:?} and namespace {:?}.",
+                    domain.0, namespace
+                ))?;
+            }
             tx.execute(
                 "DELETE FROM persistent.keyentry
                  WHERE domain = ? AND namespace = ? AND key_type = ?;",
@@ -2579,6 +2598,11 @@ impl KeystoreDB {
         let _wp = wd::watch("KeystoreDB::unbind_keys_for_user");
 
         self.with_transaction(Immediate("TX_unbind_keys_for_user"), |tx| {
+            Self::delete_received_grants(tx, user_id).context(format!(
+                "In unbind_keys_for_user. Failed to delete received grants for user ID {:?}.",
+                user_id
+            ))?;
+
             let mut stmt = tx
                 .prepare(&format!(
                     "SELECT id from persistent.keyentry
@@ -2624,7 +2648,7 @@ impl KeystoreDB {
             let mut notify_gc = false;
             for key_id in key_ids {
                 notify_gc = Self::mark_unreferenced(tx, key_id)
-                    .context("In unbind_keys_for_user.")?
+                    .context("In unbind_keys_for_user. Failed to mark key id as unreferenced.")?
                     || notify_gc;
             }
             Ok(()).do_gc(notify_gc)
@@ -3048,5 +3072,12 @@ impl KeystoreDB {
 
         let app_uids_vec: Vec<i64> = app_uids_affected_by_sid.into_iter().collect();
         Ok(app_uids_vec)
+    }
+
+    /// Retrieve a database PRAGMA config value.
+    pub fn pragma<T: FromSql>(&mut self, name: &str) -> Result<T> {
+        self.conn
+            .query_row(&format!("PRAGMA persistent.{name}"), (), |row| row.get(0))
+            .context(format!("failed to read pragma {name}"))
     }
 }

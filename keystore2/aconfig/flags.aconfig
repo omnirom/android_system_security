@@ -26,14 +26,6 @@ flag {
 }
 
 flag {
-  name: "enable_dump"
-  namespace: "hardware_backed_security"
-  description: "Include support for dump() on the IKeystoreMaintenance service"
-  bug: "344987718"
-  is_fixed_read_only: true
-}
-
-flag {
   name: "import_previously_emulated_keys"
   namespace: "hardware_backed_security"
   description: "Include support for importing keys that were previously software-emulated into KeyMint"

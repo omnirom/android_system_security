@@ -46,7 +46,11 @@ use android_security_compat::aidl::android::security::compat::IKeystoreCompatSer
 use anyhow::{Context, Result};
 use binder::FromIBinder;
 use binder::{get_declared_instances, is_declared};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use rustutils::system_properties::PropertyWatcher;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, LazyLock, Mutex, RwLock,
+};
 use std::{cell::RefCell, sync::Once};
 use std::{collections::HashMap, path::Path, path::PathBuf};
 
@@ -448,4 +452,41 @@ pub fn get_remotely_provisioned_component_name(security_level: &SecurityLevel) -
     }
     .ok_or(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
     .context(ks_err!("Failed to get rpc for sec level {:?}", *security_level))
+}
+
+/// Whether boot is complete.
+static BOOT_COMPLETED: AtomicBool = AtomicBool::new(false);
+
+/// Indicate whether boot is complete.
+///
+/// This in turn indicates whether it is safe to make permanent changes to state.
+pub fn boot_completed() -> bool {
+    BOOT_COMPLETED.load(Ordering::Acquire)
+}
+
+/// Monitor the system property for boot complete.  This blocks and so needs to be run in a separate
+/// thread.
+pub fn await_boot_completed() {
+    // Use a fairly long watchdog timeout of 5 minutes here. This blocks until the device
+    // boots, which on a very slow device (e.g., emulator for a non-native architecture) can
+    // take minutes. Blocking here would be unexpected only if it never finishes.
+    let _wp = wd::watch_millis("await_boot_completed", 300_000);
+    log::info!("monitoring for sys.boot_completed=1");
+    while let Err(e) = watch_for_boot_completed() {
+        log::error!("failed to watch for boot_completed: {e:?}");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    BOOT_COMPLETED.store(true, Ordering::Release);
+    log::info!("wait_for_boot_completed done, triggering GC");
+
+    // Garbage collection may have been skipped until now, so trigger a check.
+    GC.notify_gc();
+}
+
+fn watch_for_boot_completed() -> Result<()> {
+    let mut w = PropertyWatcher::new("sys.boot_completed")
+        .context(ks_err!("PropertyWatcher::new failed"))?;
+    w.wait_for_value("1", None).context(ks_err!("Failed to wait for sys.boot_completed"))?;
+    Ok(())
 }

@@ -19,7 +19,7 @@ use crate::error::into_logged_binder;
 use crate::error::map_km_error;
 use crate::error::Error;
 use crate::globals::get_keymint_device;
-use crate::globals::{DB, LEGACY_IMPORTER, SUPER_KEY, ENCODED_MODULE_INFO};
+use crate::globals::{DB, ENCODED_MODULE_INFO, LEGACY_IMPORTER, SUPER_KEY};
 use crate::ks_err;
 use crate::permission::{KeyPerm, KeystorePerm};
 use crate::super_key::SuperKeyManager;
@@ -29,6 +29,9 @@ use crate::utils::{
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     ErrorCode::ErrorCode, IKeyMintDevice::IKeyMintDevice, KeyParameter::KeyParameter, KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
+};
+use apex_aidl_interface::aidl::android::apex::{
+    IApexService::IApexService,
 };
 use android_security_maintenance::aidl::android::security::maintenance::IKeystoreMaintenance::{
     BnKeystoreMaintenance, IKeystoreMaintenance,
@@ -42,22 +45,27 @@ use android_security_metrics::aidl::android::security::metrics::{
 use android_system_keystore2::aidl::android::system::keystore2::KeyDescriptor::KeyDescriptor;
 use android_system_keystore2::aidl::android::system::keystore2::ResponseCode::ResponseCode;
 use anyhow::{anyhow, Context, Result};
+use binder::wait_for_interface;
 use bssl_crypto::digest;
 use der::{DerOrd, Encode, asn1::OctetString, asn1::SetOfVec, Sequence};
 use keystore2_crypto::Password;
+use rustutils::system_properties::PropertyWatcher;
 use std::cmp::Ordering;
 
 /// Reexport Domain for the benefit of DeleteListener
 pub use android_system_keystore2::aidl::android::system::keystore2::Domain::Domain;
 
+#[cfg(test)]
+mod tests;
+
 /// Version number of KeyMint V4.
 pub const KEYMINT_V4: i32 = 400;
 
 /// Module information structure for DER-encoding.
-#[derive(Sequence, Debug)]
+#[derive(Sequence, Debug, PartialEq, Eq)]
 struct ModuleInfo {
     name: OctetString,
-    version: i32,
+    version: i64,
 }
 
 impl DerOrd for ModuleInfo {
@@ -213,7 +221,8 @@ impl Maintenance {
                         && e.downcast_ref::<Error>()
                             == Some(&Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
                     {
-                        log::info!("Call to {} failed for StrongBox as it is not available", name,)
+                        log::info!("Call to {} failed for StrongBox as it is not available", name);
+                        return Ok(());
                     } else {
                         log::error!(
                             "Call to {} failed for security level {}: {}.",
@@ -238,8 +247,106 @@ impl Maintenance {
         {
             log::error!("SUPER_KEY.set_up_boot_level_cache failed:\n{:?}\n:(", e);
         }
-
         Maintenance::call_on_all_security_levels("earlyBootEnded", |dev| dev.earlyBootEnded(), None)
+    }
+
+    /// Spawns a thread to send module info if it hasn't already been sent. The thread first waits
+    /// for the apex info to be available.
+    /// (Module info would have already been sent in the case of a Keystore restart.)
+    ///
+    /// # Panics
+    ///
+    /// This method, and methods it calls, panic on failure, because a failure to populate module
+    /// information will block the boot process from completing. In this method, this happens if:
+    /// - the `apexd.status` property is unable to be monitored
+    /// - the `keystore.module_hash.sent` property cannot be updated
+    pub fn check_send_module_info() {
+        if rustutils::system_properties::read_bool("keystore.module_hash.sent", false)
+            .unwrap_or(false)
+        {
+            log::info!("Module info has already been sent.");
+            return;
+        }
+        if keystore2_flags::attest_modules() {
+            std::thread::spawn(move || {
+                // Wait for apex info to be available before populating.
+                Self::watch_apex_info().unwrap_or_else(|e| {
+                    log::error!("failed to monitor apexd.status property: {e:?}");
+                    panic!("Terminating due to inaccessibility of apexd.status property, blocking boot: {e:?}");
+                });
+            });
+        } else {
+            rustutils::system_properties::write("keystore.module_hash.sent", "true")
+                .unwrap_or_else(|e| {
+                        log::error!("Failed to set keystore.module_hash.sent to true; this will therefore block boot: {e:?}");
+                        panic!("Crashing Keystore because it failed to set keystore.module_hash.sent to true (which blocks boot).");
+                    }
+                );
+        }
+    }
+
+    /// Watch the `apexd.status` system property, and read apex module information once
+    /// it is `activated`.
+    ///
+    /// Blocks waiting for system property changes, so must be run in its own thread.
+    fn watch_apex_info() -> Result<()> {
+        let apex_prop = "apexd.status";
+        log::info!("start monitoring '{apex_prop}' property");
+        let mut w =
+            PropertyWatcher::new(apex_prop).context(ks_err!("PropertyWatcher::new failed"))?;
+        loop {
+            let value = w.read(|_name, value| Ok(value.to_string()));
+            log::info!("property '{apex_prop}' is now '{value:?}'");
+            if matches!(value.as_deref(), Ok("activated")) {
+                Self::read_and_set_module_info();
+                return Ok(());
+            }
+            log::info!("await a change to '{apex_prop}'...");
+            w.wait(None).context(ks_err!("property wait failed"))?;
+            log::info!("await a change to '{apex_prop}'...notified");
+        }
+    }
+
+    /// Read apex information (which is assumed to be present) and propagate module
+    /// information to KeyMint instances.
+    ///
+    /// # Panics
+    ///
+    /// This method panics on failure, because a failure to populate module information
+    /// will block the boot process from completing.  This happens if:
+    /// - apex information is not available (precondition)
+    /// - KeyMint instances fail to accept module information
+    /// - the `keystore.module_hash.sent` property cannot be updated
+    fn read_and_set_module_info() {
+        let modules = Self::read_apex_info().unwrap_or_else(|e| {
+            log::error!("failed to read apex info: {e:?}");
+            panic!("Terminating due to unavailability of apex info, blocking boot: {e:?}");
+        });
+        Self::set_module_info(modules).unwrap_or_else(|e| {
+            log::error!("failed to set module info: {e:?}");
+            panic!("Terminating due to KeyMint not accepting module info, blocking boot: {e:?}");
+        });
+        rustutils::system_properties::write("keystore.module_hash.sent", "true").unwrap_or_else(|e| {
+            log::error!("failed to set keystore.module_hash.sent property: {e:?}");
+            panic!("Terminating due to failure to set keystore.module_hash.sent property, blocking boot: {e:?}");
+        });
+    }
+
+    fn read_apex_info() -> Result<Vec<ModuleInfo>> {
+        let _wp = wd::watch("read_apex_info via IApexService.getActivePackages()");
+        let apexd: Strong<dyn IApexService> =
+            wait_for_interface("apexservice").context("failed to AIDL connect to apexd")?;
+        let packages = apexd.getActivePackages().context("failed to retrieve active packages")?;
+        packages
+            .into_iter()
+            .map(|pkg| {
+                log::info!("apex modules += {} version {}", pkg.moduleName, pkg.versionCode);
+                let name = OctetString::new(pkg.moduleName.as_bytes()).map_err(|e| {
+                    anyhow!("failed to convert '{}' to OCTET_STRING: {e:?}", pkg.moduleName)
+                })?;
+                Ok(ModuleInfo { name, version: pkg.versionCode })
+            })
+            .collect()
     }
 
     fn migrate_key_namespace(source: &KeyDescriptor, destination: &KeyDescriptor) -> Result<()> {
@@ -314,7 +421,10 @@ impl Maintenance {
         writeln!(f, "keystore2 running")?;
         writeln!(f)?;
 
-        // Display underlying device information
+        // Display underlying device information.
+        //
+        // Note that this chunk of output is parsed in a GTS test, so do not change the format
+        // without checking that the test still works.
         for sec_level in &[SecurityLevel::TRUSTED_ENVIRONMENT, SecurityLevel::STRONGBOX] {
             let Ok((_dev, hw_info, uuid)) = get_keymint_device(sec_level) else { continue };
 
@@ -325,6 +435,19 @@ impl Maintenance {
             writeln!(f, "  Timestamp token required: {}", hw_info.timestampTokenRequired)?;
         }
         writeln!(f)?;
+
+        // Display module attestation information
+        {
+            let info = ENCODED_MODULE_INFO.read().unwrap();
+            if let Some(info) = info.as_ref() {
+                writeln!(f, "Attested module information (DER-encoded):")?;
+                writeln!(f, "  {}", hex::encode(info))?;
+                writeln!(f)?;
+            } else {
+                writeln!(f, "Attested module information not set")?;
+                writeln!(f)?;
+            }
+        }
 
         // Display database size information.
         match crate::metrics_store::pull_storage_stats() {
@@ -351,6 +474,34 @@ impl Maintenance {
         }
         writeln!(f)?;
 
+        // Display database config information.
+        writeln!(f, "Database configuration:")?;
+        DB.with(|db| -> std::io::Result<()> {
+            let pragma_str = |f: &mut dyn std::io::Write, name| -> std::io::Result<()> {
+                let mut db = db.borrow_mut();
+                let value: String = db
+                    .pragma(name)
+                    .unwrap_or_else(|e| format!("unknown value for '{name}', failed: {e:?}"));
+                writeln!(f, "  {name} = {value}")
+            };
+            let pragma_i32 = |f: &mut dyn std::io::Write, name| -> std::io::Result<()> {
+                let mut db = db.borrow_mut();
+                let value: i32 = db.pragma(name).unwrap_or_else(|e| {
+                    log::error!("unknown value for '{name}', failed: {e:?}");
+                    -1
+                });
+                writeln!(f, "  {name} = {value}")
+            };
+            pragma_i32(f, "auto_vacuum")?;
+            pragma_str(f, "journal_mode")?;
+            pragma_i32(f, "journal_size_limit")?;
+            pragma_i32(f, "synchronous")?;
+            pragma_i32(f, "schema_version")?;
+            pragma_i32(f, "user_version")?;
+            Ok(())
+        })?;
+        writeln!(f)?;
+
         // Display accumulated metrics.
         writeln!(f, "Metrics information:")?;
         writeln!(f)?;
@@ -363,8 +514,8 @@ impl Maintenance {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn set_module_info(module_info: Vec<ModuleInfo>) -> Result<()> {
+        log::info!("set_module_info with {} modules", module_info.len());
         let encoding = Self::encode_module_info(module_info)
             .map_err(|e| anyhow!({ e }))
             .context(ks_err!("Failed to encode module_info"))?;
@@ -396,7 +547,6 @@ impl Maintenance {
         )
     }
 
-    #[allow(dead_code)]
     fn encode_module_info(module_info: Vec<ModuleInfo>) -> Result<Vec<u8>, der::Error> {
         SetOfVec::<ModuleInfo>::from_iter(module_info.into_iter())?.to_der()
     }
@@ -408,10 +558,6 @@ impl Interface for Maintenance {
         f: &mut dyn std::io::Write,
         _args: &[&std::ffi::CStr],
     ) -> Result<(), binder::StatusCode> {
-        if !keystore2_flags::enable_dump() {
-            log::info!("skipping dump() as flag not enabled");
-            return Ok(());
-        }
         log::info!("dump()");
         let _wp = wd::watch("IKeystoreMaintenance::dump");
         check_dump_permission().map_err(|_e| {

@@ -518,9 +518,7 @@ pub fn verify_aliases(
 // then returns an empty byte vector.
 pub fn get_system_prop(name: &str) -> Vec<u8> {
     match rustutils::system_properties::read(name) {
-        Ok(Some(value)) => {
-            return value.as_bytes().to_vec();
-        }
+        Ok(Some(value)) => value.as_bytes().to_vec(),
         _ => {
             vec![]
         }
@@ -619,4 +617,26 @@ pub fn verify_certificate_serial_num(cert_bytes: &[u8], expected_serial_num: &Bi
     let cert = X509::from_der(cert_bytes).unwrap();
     let serial_num = cert.serial_number();
     assert_eq!(serial_num.to_bn().as_ref().unwrap(), expected_serial_num);
+}
+
+/// Check the error code from an attempt to perform device ID attestation with an invalid value.
+pub fn device_id_attestation_check_acceptable_error(attest_id_tag: Tag, e: Error) {
+    match e {
+        // Standard/default error code for ID mismatch.
+        Error::Km(ErrorCode::CANNOT_ATTEST_IDS) => {}
+        Error::Km(ErrorCode::INVALID_TAG) if get_vsr_api_level() < 34 => {
+            // Allow older implementations to (incorrectly) use INVALID_TAG.
+        }
+        Error::Km(ErrorCode::ATTESTATION_IDS_NOT_PROVISIONED)
+            if matches!(
+                attest_id_tag,
+                Tag::ATTESTATION_ID_IMEI
+                    | Tag::ATTESTATION_ID_MEID
+                    | Tag::ATTESTATION_ID_SECOND_IMEI
+            ) =>
+        {
+            // Non-phone devices will not have IMEI/MEID provisioned.
+        }
+        _ => panic!("Unexpected error {e:?} on ID mismatch for {attest_id_tag:?}"),
+    }
 }

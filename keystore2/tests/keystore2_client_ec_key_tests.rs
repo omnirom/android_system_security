@@ -211,7 +211,7 @@ fn keystore2_get_key_entry_blob_fail() {
     assert_eq!(Error::Rc(ResponseCode::INVALID_ARGUMENT), result.unwrap_err());
 
     // Delete the generated key blob.
-    sl.binder.deleteKey(&key_metadata.key).unwrap();
+    sl.delete_key(&key_metadata.key).unwrap();
 }
 
 /// Try to generate a key with invalid Domain. `INVALID_ARGUMENT` error response is expected.
@@ -514,5 +514,5 @@ fn keystore2_generate_key_with_blob_domain() {
     );
 
     // Delete the generated key blob.
-    sl.binder.deleteKey(&key_metadata.key).unwrap();
+    sl.delete_key(&key_metadata.key).unwrap();
 }

@@ -14,7 +14,9 @@
 
 //! Tests for user authentication interactions (via `IKeystoreAuthorization`).
 
-use crate::keystore2_client_test_utils::{BarrierReached, BarrierReachedWithData};
+use crate::keystore2_client_test_utils::{
+    BarrierReached, BarrierReachedWithData, get_vsr_api_level
+};
 use android_security_authorization::aidl::android::security::authorization::{
     IKeystoreAuthorization::IKeystoreAuthorization
 };
@@ -59,12 +61,13 @@ static SYNTHETIC_PASSWORD: &[u8] = &[
 ];
 /// Gatekeeper password.
 static GK_PASSWORD: &[u8] = b"correcthorsebatterystaple";
-/// Fake SID value corresponding to Gatekeeper.
-static GK_FAKE_SID: i64 = 123456;
-/// Fake SID value corresponding to a biometric authenticator.
-static BIO_FAKE_SID1: i64 = 345678;
-/// Fake SID value corresponding to a biometric authenticator.
-static BIO_FAKE_SID2: i64 = 456789;
+/// Fake SID base value corresponding to Gatekeeper.  Individual tests use different SIDs to reduce
+/// the chances of cross-contamination, calculated statically (because each test is forked into a
+/// separate process).
+static GK_FAKE_SID_BASE: i64 = 123400;
+/// Fake SID base value corresponding to a biometric authenticator.  Individual tests use different
+/// SIDs to reduce the chances of cross-contamination.
+static BIO_FAKE_SID_BASE: i64 = 345600;
 
 const WEAK_UNLOCK_ENABLED: bool = true;
 const WEAK_UNLOCK_DISABLED: bool = false;
@@ -171,6 +174,8 @@ impl Drop for TestUser {
 
 #[test]
 fn test_auth_bound_timeout_with_gk() {
+    let bio_fake_sid1 = BIO_FAKE_SID_BASE + 1;
+    let bio_fake_sid2 = BIO_FAKE_SID_BASE + 2;
     type Barrier = BarrierReachedWithData<Option<i64>>;
     android_logger::init_once(
         android_logger::Config::default()
@@ -199,8 +204,8 @@ fn test_auth_bound_timeout_with_gk() {
             ks2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).context("no TEE")?;
         let params = AuthSetBuilder::new()
             .user_secure_id(gk_sid)
-            .user_secure_id(BIO_FAKE_SID1)
-            .user_secure_id(BIO_FAKE_SID2)
+            .user_secure_id(bio_fake_sid1)
+            .user_secure_id(bio_fake_sid2)
             .user_auth_type(HardwareAuthenticatorType::ANY)
             .auth_timeout(3)
             .algorithm(Algorithm::EC)
@@ -214,7 +219,7 @@ fn test_auth_bound_timeout_with_gk() {
                 &KeyDescriptor {
                     domain: Domain::APP,
                     nspace: -1,
-                    alias: Some("auth-bound-timeout".to_string()),
+                    alias: Some("auth-bound-timeout-1".to_string()),
                     blob: None,
                 },
                 None,
@@ -223,7 +228,7 @@ fn test_auth_bound_timeout_with_gk() {
                 b"entropy",
             )
             .context("key generation failed")?;
-        info!("A: created auth-timeout key {key:?}");
+        info!("A: created auth-timeout key {key:?} bound to sids {gk_sid}, {bio_fake_sid1}, {bio_fake_sid2}");
 
         // No HATs so cannot create an operation using the key.
         let params = AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256);
@@ -279,7 +284,7 @@ fn test_auth_bound_timeout_with_gk() {
 
     // Lock and unlock to ensure super keys are already created.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
 
@@ -304,6 +309,9 @@ fn test_auth_bound_timeout_with_gk() {
 
 #[test]
 fn test_auth_bound_timeout_failure() {
+    let gk_fake_sid = GK_FAKE_SID_BASE + 1;
+    let bio_fake_sid1 = BIO_FAKE_SID_BASE + 3;
+    let bio_fake_sid2 = BIO_FAKE_SID_BASE + 4;
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("keystore2_client_tests")
@@ -323,8 +331,8 @@ fn test_auth_bound_timeout_failure() {
         let sec_level =
             ks2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).context("no TEE")?;
         let params = AuthSetBuilder::new()
-            .user_secure_id(BIO_FAKE_SID1)
-            .user_secure_id(BIO_FAKE_SID2)
+            .user_secure_id(bio_fake_sid1)
+            .user_secure_id(bio_fake_sid2)
             .user_auth_type(HardwareAuthenticatorType::ANY)
             .auth_timeout(3)
             .algorithm(Algorithm::EC)
@@ -338,7 +346,7 @@ fn test_auth_bound_timeout_failure() {
                 &KeyDescriptor {
                     domain: Domain::APP,
                     nspace: -1,
-                    alias: Some("auth-bound-timeout".to_string()),
+                    alias: Some("auth-bound-timeout-2".to_string()),
                     blob: None,
                 },
                 None,
@@ -347,7 +355,7 @@ fn test_auth_bound_timeout_failure() {
                 b"entropy",
             )
             .context("key generation failed")?;
-        info!("A: created auth-timeout key {key:?}");
+        info!("A: created auth-timeout key {key:?} bound to sids {bio_fake_sid1}, {bio_fake_sid2}");
 
         // No HATs so cannot create an operation using the key.
         let params = AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256);
@@ -361,7 +369,12 @@ fn test_auth_bound_timeout_failure() {
         reader.recv();
 
         let result = sec_level.createOperation(&key, &params, UNFORCED);
-        expect_km_error!(&result, ErrorCode::KEY_USER_NOT_AUTHENTICATED);
+        expect!(result.is_err());
+        if get_vsr_api_level() >= 35 {
+            // Older devices may report an incorrect error code when presented with an invalid auth
+            // token.
+            expect_km_error!(&result, ErrorCode::KEY_USER_NOT_AUTHENTICATED);
+        }
         info!("B: failed auth-bound operation (HAT is invalid) as expected {result:?}");
 
         writer.send(&BarrierReached {}); // B done.
@@ -395,10 +408,10 @@ fn test_auth_bound_timeout_failure() {
 
     // Lock and unlock to ensure super keys are already created.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_lskf_token(GK_FAKE_SID)).unwrap();
+    auth_service.addAuthToken(&fake_lskf_token(gk_fake_sid)).unwrap();
 
     info!("trigger child process action A and wait for completion");
     child_handle.send(&BarrierReached {});
@@ -406,7 +419,7 @@ fn test_auth_bound_timeout_failure() {
 
     // Unlock with password and a fake auth token that matches the key
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_bio_lskf_token(GK_FAKE_SID, BIO_FAKE_SID1)).unwrap();
+    auth_service.addAuthToken(&fake_bio_lskf_token(gk_fake_sid, bio_fake_sid1)).unwrap();
 
     info!("trigger child process action B and wait for completion");
     child_handle.send(&BarrierReached {});
@@ -421,6 +434,8 @@ fn test_auth_bound_timeout_failure() {
 
 #[test]
 fn test_auth_bound_per_op_with_gk() {
+    let bio_fake_sid1 = BIO_FAKE_SID_BASE + 5;
+    let bio_fake_sid2 = BIO_FAKE_SID_BASE + 6;
     type Barrier = BarrierReachedWithData<Option<i64>>;
     android_logger::init_once(
         android_logger::Config::default()
@@ -449,7 +464,7 @@ fn test_auth_bound_per_op_with_gk() {
             ks2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).context("no TEE")?;
         let params = AuthSetBuilder::new()
             .user_secure_id(gk_sid)
-            .user_secure_id(BIO_FAKE_SID1)
+            .user_secure_id(bio_fake_sid1)
             .user_auth_type(HardwareAuthenticatorType::ANY)
             .algorithm(Algorithm::EC)
             .purpose(KeyPurpose::SIGN)
@@ -462,7 +477,7 @@ fn test_auth_bound_per_op_with_gk() {
                 &KeyDescriptor {
                     domain: Domain::APP,
                     nspace: -1,
-                    alias: Some("auth-per-op".to_string()),
+                    alias: Some("auth-per-op-1".to_string()),
                     blob: None,
                 },
                 None,
@@ -471,7 +486,7 @@ fn test_auth_bound_per_op_with_gk() {
                 b"entropy",
             )
             .context("key generation failed")?;
-        info!("A: created auth-per-op key {key:?}");
+        info!("A: created auth-per-op key {key:?} bound to sids {gk_sid}, {bio_fake_sid1}");
 
         // We can create an operation using the key...
         let params = AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256);
@@ -530,7 +545,7 @@ fn test_auth_bound_per_op_with_gk() {
 
     // Lock and unlock to ensure super keys are already created.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
 
@@ -554,8 +569,10 @@ fn test_auth_bound_per_op_with_gk() {
 }
 
 #[test]
-fn test_auth_bound_per_op_failure() {
-    type Barrier = BarrierReachedWithData<i64>;
+fn test_auth_bound_per_op_with_gk_failure() {
+    let bio_fake_sid1 = BIO_FAKE_SID_BASE + 7;
+    let bio_fake_sid2 = BIO_FAKE_SID_BASE + 8;
+    type Barrier = BarrierReachedWithData<Option<i64>>;
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("keystore2_client_tests")
@@ -566,17 +583,24 @@ fn test_auth_bound_per_op_failure() {
                          writer: &mut ChannelWriter<Barrier>|
           -> Result<(), run_as::Error> {
         // Now we're in a new process, wait to be notified before starting.
-        reader.recv();
+        let gk_sid: i64 = match reader.recv().0 {
+            Some(sid) => sid,
+            None => {
+                // There is no AIDL Gatekeeper available, so abandon the test.  It would be nice to
+                // know this before starting the child process, but finding it out requires Binder,
+                // which can't be used until after the child has forked.
+                return Ok(());
+            }
+        };
 
         // Action A: create a new auth-bound key which requires auth-per-operation (because
         // AUTH_TIMEOUT is not specified), and fail to finish an operation using it.
         let ks2 = get_keystore_service();
-
         let sec_level =
             ks2.getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT).context("no TEE")?;
         let params = AuthSetBuilder::new()
-            .user_secure_id(GK_FAKE_SID)
-            .user_secure_id(BIO_FAKE_SID1)
+            .user_secure_id(gk_sid)
+            .user_secure_id(bio_fake_sid1)
             .user_auth_type(HardwareAuthenticatorType::ANY)
             .algorithm(Algorithm::EC)
             .purpose(KeyPurpose::SIGN)
@@ -589,7 +613,7 @@ fn test_auth_bound_per_op_failure() {
                 &KeyDescriptor {
                     domain: Domain::APP,
                     nspace: -1,
-                    alias: Some("auth-per-op".to_string()),
+                    alias: Some("auth-per-op-2".to_string()),
                     blob: None,
                 },
                 None,
@@ -598,7 +622,7 @@ fn test_auth_bound_per_op_failure() {
                 b"entropy",
             )
             .context("key generation failed")?;
-        info!("A: created auth-per-op key {key:?}");
+        info!("A: created auth-per-op key {key:?} bound to sids {gk_sid}, {bio_fake_sid1}");
 
         // We can create an operation using the key...
         let params = AuthSetBuilder::new().purpose(KeyPurpose::SIGN).digest(Digest::SHA_2_256);
@@ -613,7 +637,7 @@ fn test_auth_bound_per_op_failure() {
         expect_km_error!(&result, ErrorCode::KEY_USER_NOT_AUTHENTICATED);
         info!("A: failed auth-per-op op (no HAT) as expected {result:?}");
 
-        writer.send(&Barrier::new(0)); // A done.
+        writer.send(&Barrier::new(None)); // A done.
 
         // Action B: fail again when an irrelevant HAT is available.
         reader.recv();
@@ -629,7 +653,7 @@ fn test_auth_bound_per_op_failure() {
         expect_km_error!(&result, ErrorCode::KEY_USER_NOT_AUTHENTICATED);
         info!("B: failed auth-per-op op (HAT is not per-op) as expected {result:?}");
 
-        writer.send(&Barrier::new(0)); // B done.
+        writer.send(&Barrier::new(None)); // B done.
 
         // Action C: start an operation and pass out the challenge
         reader.recv();
@@ -638,7 +662,7 @@ fn test_auth_bound_per_op_failure() {
             .expect("failed to create auth-per-op operation");
         let op = result.iOperation.context("no operation in result")?;
         info!("C: created auth-per-op operation, got challenge {:?}", result.operationChallenge);
-        writer.send(&Barrier::new(result.operationChallenge.unwrap().challenge)); // C done.
+        writer.send(&Barrier::new(Some(result.operationChallenge.unwrap().challenge))); // C done.
 
         // Action D: finishing the operation still fails because the per-op HAT
         // is invalid (the HMAC signature is faked and so the secure world
@@ -647,7 +671,7 @@ fn test_auth_bound_per_op_failure() {
         let result = op.finish(Some(b"data"), None);
         expect_km_error!(&result, ErrorCode::KEY_USER_NOT_AUTHENTICATED);
         info!("D: failed auth-per-op op (HAT is per-op but invalid) as expected {result:?}");
-        writer.send(&Barrier::new(0)); // D done.
+        writer.send(&Barrier::new(None)); // D done.
 
         Ok(())
     };
@@ -664,37 +688,43 @@ fn test_auth_bound_per_op_failure() {
     // user.
     let _ks2 = get_keystore_service();
     let user = TestUser::new();
+    if user.gk.is_none() {
+        // Can't run this test if there's no AIDL Gatekeeper.
+        child_handle.send(&Barrier::new(None));
+        assert_eq!(child_handle.get_result(), Ok(()), "child process failed");
+        return;
+    }
     let user_id = user.id;
     let auth_service = get_authorization();
 
     // Lock and unlock to ensure super keys are already created.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_lskf_token(GK_FAKE_SID)).unwrap();
 
     info!("trigger child process action A and wait for completion");
-    child_handle.send(&Barrier::new(0));
+    let gk_sid = user.gk_sid.unwrap();
+    child_handle.send(&Barrier::new(Some(gk_sid)));
     child_handle.recv_or_die();
 
     // Unlock with password and a fake auth token.
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_lskf_token(GK_FAKE_SID)).unwrap();
+    auth_service.addAuthToken(&fake_lskf_token(gk_sid)).unwrap();
 
     info!("trigger child process action B and wait for completion");
-    child_handle.send(&Barrier::new(0));
+    child_handle.send(&Barrier::new(None));
     child_handle.recv_or_die();
 
     info!("trigger child process action C and wait for completion");
-    child_handle.send(&Barrier::new(0));
-    let challenge = child_handle.recv_or_die().0;
+    child_handle.send(&Barrier::new(None));
+    let challenge = child_handle.recv_or_die().0.expect("no challenge");
 
     // Add a fake auth token with the challenge value.
-    auth_service.addAuthToken(&fake_lskf_token_with_challenge(GK_FAKE_SID, challenge)).unwrap();
+    auth_service.addAuthToken(&fake_lskf_token_with_challenge(gk_sid, challenge)).unwrap();
 
     info!("trigger child process action D and wait for completion");
-    child_handle.send(&Barrier::new(0));
+    child_handle.send(&Barrier::new(None));
     child_handle.recv_or_die();
 
     assert_eq!(child_handle.get_result(), Ok(()), "child process failed");
@@ -702,6 +732,9 @@ fn test_auth_bound_per_op_failure() {
 
 #[test]
 fn test_unlocked_device_required() {
+    let gk_fake_sid = GK_FAKE_SID_BASE + 3;
+    let bio_fake_sid1 = BIO_FAKE_SID_BASE + 9;
+    let bio_fake_sid2 = BIO_FAKE_SID_BASE + 10;
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("keystore2_client_tests")
@@ -804,10 +837,10 @@ fn test_unlocked_device_required() {
 
     // Lock and unlock to ensure super keys are already created.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_lskf_token(GK_FAKE_SID)).unwrap();
+    auth_service.addAuthToken(&fake_lskf_token(gk_fake_sid)).unwrap();
 
     info!("trigger child process action A while unlocked and wait for completion");
     child_handle.send(&BarrierReached {});
@@ -815,7 +848,7 @@ fn test_unlocked_device_required() {
 
     // Move to locked and don't allow weak unlock, so super keys are wiped.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_DISABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_DISABLED)
         .unwrap();
 
     info!("trigger child process action B while locked and wait for completion");
@@ -824,7 +857,7 @@ fn test_unlocked_device_required() {
 
     // Unlock with password => loads super key from database.
     auth_service.onDeviceUnlocked(user_id, Some(SYNTHETIC_PASSWORD)).unwrap();
-    auth_service.addAuthToken(&fake_lskf_token(GK_FAKE_SID)).unwrap();
+    auth_service.addAuthToken(&fake_lskf_token(gk_fake_sid)).unwrap();
 
     info!("trigger child process action C while lskf-unlocked and wait for completion");
     child_handle.send(&BarrierReached {});
@@ -832,7 +865,7 @@ fn test_unlocked_device_required() {
 
     // Move to locked and allow weak unlock, then do a weak unlock.
     auth_service
-        .onDeviceLocked(user_id, &[BIO_FAKE_SID1, BIO_FAKE_SID2], WEAK_UNLOCK_ENABLED)
+        .onDeviceLocked(user_id, &[bio_fake_sid1, bio_fake_sid2], WEAK_UNLOCK_ENABLED)
         .unwrap();
     auth_service.onDeviceUnlocked(user_id, None).unwrap();
 
@@ -866,7 +899,7 @@ fn fake_bio_lskf_token(gk_sid: i64, bio_sid: i64) -> HardwareAuthToken {
         challenge: 0,
         userId: gk_sid,
         authenticatorId: bio_sid,
-        authenticatorType: HardwareAuthenticatorType::PASSWORD,
+        authenticatorType: HardwareAuthenticatorType::FINGERPRINT,
         timestamp: Timestamp { milliSeconds: 123 },
         mac: vec![1, 2, 3],
     }

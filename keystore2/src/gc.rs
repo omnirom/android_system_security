@@ -22,6 +22,7 @@ use crate::ks_err;
 use crate::{
     async_task,
     database::{KeystoreDB, SupersededBlob, Uuid},
+    globals,
     super_key::SuperKeyManager,
 };
 use anyhow::{Context, Result};
@@ -135,6 +136,17 @@ impl GcInternal {
     /// Processes one key and then schedules another attempt until it runs out of blobs to delete.
     fn step(&mut self) {
         self.notified.store(0, Ordering::Relaxed);
+        if !globals::boot_completed() {
+            // Garbage collection involves a operation (`IKeyMintDevice::deleteKey()`) that cannot
+            // be rolled back in some cases (specifically, when the key is rollback-resistant), even
+            // if the Keystore database is restored to the version of an earlier userdata filesystem
+            // checkpoint.
+            //
+            // This means that we should not perform GC until boot has fully completed, and any
+            // in-progress OTA is definitely not going to be rolled back.
+            log::info!("skip GC as boot not completed");
+            return;
+        }
         if let Err(e) = self.process_one_key() {
             log::error!("Error trying to delete blob entry. {:?}", e);
         }

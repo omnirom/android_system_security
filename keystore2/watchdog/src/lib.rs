@@ -64,6 +64,18 @@ struct Record {
     context: Option<Box<dyn std::fmt::Debug + Send + 'static>>,
 }
 
+impl Record {
+    // Return a string representation of the start time of the record.
+    //
+    // Times are hard. This may not be accurate (e.g. if the system clock has been modified since
+    // the watchdog started), but it's _really_ useful to get a starting wall time for overrunning
+    // watchdogs.
+    fn started_utc(&self) -> String {
+        let started_utc = chrono::Utc::now() - self.started.elapsed();
+        format!("{}", started_utc.format("%m-%d %H:%M:%S%.3f UTC"))
+    }
+}
+
 struct WatchdogState {
     state: State,
     thread: Option<thread::JoinHandle<()>>,
@@ -137,8 +149,13 @@ impl WatchdogState {
             .filter(|(_, r)| r.deadline.saturating_duration_since(now) == Duration::new(0, 0))
             .collect();
 
-        log::warn!("When extracting from a bug report, please include this header");
-        log::warn!("and all {} records below.", overdue_records.len());
+        log::warn!(
+            concat!(
+                "When extracting from a bug report, please include this header ",
+                "and all {} records below (to footer)"
+            ),
+            overdue_records.len()
+        );
 
         // Watch points can be nested, i.e., a single thread may have multiple armed
         // watch points. And the most recent on each thread (thread recent) is closest to the point
@@ -169,9 +186,10 @@ impl WatchdogState {
                 match &r.context {
                     Some(ctx) => {
                         log::warn!(
-                            "{:?} {} Pending: {:?} Overdue {:?} for {:?}",
+                            "{:?} {} Started: {} Pending: {:?} Overdue {:?} for {:?}",
                             i.tid,
                             i.id,
+                            r.started_utc(),
                             r.started.elapsed(),
                             r.deadline.elapsed(),
                             ctx
@@ -179,9 +197,10 @@ impl WatchdogState {
                     }
                     None => {
                         log::warn!(
-                            "{:?} {} Pending: {:?} Overdue {:?}",
+                            "{:?} {} Started: {} Pending: {:?} Overdue {:?}",
                             i.tid,
                             i.id,
+                            r.started_utc(),
                             r.started.elapsed(),
                             r.deadline.elapsed()
                         );
@@ -200,17 +219,19 @@ impl WatchdogState {
             if timeout_left == Duration::new(0, 0) {
                 match &record.context {
                     Some(ctx) => log::info!(
-                        "Watchdog complete for: {:?} {} Pending: {:?} Overdue {:?} for {:?}",
+                        "Watchdog complete for: {:?} {} Started: {} Pending: {:?} Overdue {:?} for {:?}",
                         index.tid,
                         index.id,
+                        record.started_utc(),
                         record.started.elapsed(),
                         record.deadline.elapsed(),
                         ctx
                     ),
                     None => log::info!(
-                        "Watchdog complete for: {:?} {} Pending: {:?} Overdue {:?}",
+                        "Watchdog complete for: {:?} {} Started: {} Pending: {:?} Overdue {:?}",
                         index.tid,
                         index.id,
+                        record.started_utc(),
                         record.started.elapsed(),
                         record.deadline.elapsed()
                     ),

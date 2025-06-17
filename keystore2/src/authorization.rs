@@ -20,7 +20,6 @@ use crate::globals::{DB, ENFORCEMENTS, LEGACY_IMPORTER, SUPER_KEY};
 use crate::ks_err;
 use crate::permission::KeystorePerm;
 use crate::utils::{check_keystore_permission, watchdog as wd};
-use aconfig_android_hardware_biometrics_rust;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
 };
@@ -36,7 +35,6 @@ use android_system_keystore2::aidl::android::system::keystore2::ResponseCode::Re
 use anyhow::{Context, Result};
 use keystore2_crypto::Password;
 use keystore2_selinux as selinux;
-use std::ffi::CString;
 
 /// This is the Authorization error type, it wraps binder exceptions and the
 /// Authorization ResponseCode
@@ -288,13 +286,6 @@ impl IKeystoreAuthorization for AuthorizationManager {
         secure_user_id: i64,
         auth_types: &[HardwareAuthenticatorType],
     ) -> binder::Result<i64> {
-        if aconfig_android_hardware_biometrics_rust::last_authentication_time() {
-            self.get_last_auth_time(secure_user_id, auth_types).map_err(into_logged_binder)
-        } else {
-            Err(BinderStatus::new_service_specific_error(
-                ResponseCode::PERMISSION_DENIED.0,
-                Some(CString::new("Feature is not enabled.").unwrap().as_c_str()),
-            ))
-        }
+        self.get_last_auth_time(secure_user_id, auth_types).map_err(into_logged_binder)
     }
 }

@@ -1218,7 +1218,7 @@ pub enum KeyBlob<'a> {
     Ref(&'a [u8]),
 }
 
-impl<'a> KeyBlob<'a> {
+impl KeyBlob<'_> {
     pub fn force_reencrypt(&self) -> bool {
         if let KeyBlob::Sensitive { force_reencrypt, .. } = self {
             *force_reencrypt
@@ -1229,7 +1229,7 @@ impl<'a> KeyBlob<'a> {
 }
 
 /// Deref returns a reference to the key material in any variant.
-impl<'a> Deref for KeyBlob<'a> {
+impl Deref for KeyBlob<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {

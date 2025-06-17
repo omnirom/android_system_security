@@ -48,6 +48,9 @@ use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
+#[cfg(test)]
+mod tests;
+
 // Note: Crash events are recorded at keystore restarts, based on the assumption that keystore only
 // gets restarted after a crash, during a boot cycle.
 const KEYSTORE_CRASH_COUNT_PROPERTY: &str = "keystore.crash_count";
@@ -205,7 +208,7 @@ fn process_key_creation_event_stats<U>(
     };
 
     let mut key_creation_with_auth_info = KeyCreationWithAuthInfo {
-        user_auth_type: MetricsHardwareAuthenticatorType::AUTH_TYPE_UNSPECIFIED,
+        user_auth_type: MetricsHardwareAuthenticatorType::NO_AUTH_TYPE,
         log10_auth_key_timeout_seconds: -1,
         security_level: MetricsSecurityLevel::SECURITY_LEVEL_UNSPECIFIED,
     };
@@ -257,6 +260,12 @@ fn process_key_creation_event_stats<U>(
                     }
                     HardwareAuthenticatorType::FINGERPRINT => {
                         MetricsHardwareAuthenticatorType::FINGERPRINT
+                    }
+                    a if a.0
+                        == HardwareAuthenticatorType::PASSWORD.0
+                            | HardwareAuthenticatorType::FINGERPRINT.0 =>
+                    {
+                        MetricsHardwareAuthenticatorType::PASSWORD_OR_FINGERPRINT
                     }
                     HardwareAuthenticatorType::ANY => MetricsHardwareAuthenticatorType::ANY,
                     _ => MetricsHardwareAuthenticatorType::AUTH_TYPE_UNSPECIFIED,
@@ -792,14 +801,14 @@ impl_summary_enum!(MetricsSecurityLevel, 9,
     SECURITY_LEVEL_KEYSTORE => "KEYSTORE",
 );
 
-// Metrics values for HardwareAuthenticatorType are broken -- the AIDL type is a bitmask
-// not an enum, so offseting the enum values by 1 doesn't work.
-impl_summary_enum!(MetricsHardwareAuthenticatorType, 6,
+impl_summary_enum!(MetricsHardwareAuthenticatorType, 8,
     AUTH_TYPE_UNSPECIFIED => "UNSPEC",
     NONE => "NONE",
     PASSWORD => "PASSWD",
     FINGERPRINT => "FPRINT",
+    PASSWORD_OR_FINGERPRINT => "PW_OR_FP",
     ANY => "ANY",
+    NO_AUTH_TYPE => "NOAUTH",
 );
 
 impl_summary_enum!(MetricsPurpose, 7,
@@ -972,33 +981,5 @@ impl Summary for KeystoreAtomPayload {
                 format!("atom={}", v.atom_id.show())
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_enum_show() {
-        let algo = MetricsAlgorithm::RSA;
-        assert_eq!("RSA ", algo.show());
-        let algo = MetricsAlgorithm(42);
-        assert_eq!("Unknown(42)", algo.show());
-    }
-
-    #[test]
-    fn test_enum_bitmask_show() {
-        let mut modes = 0i32;
-        compute_block_mode_bitmap(&mut modes, BlockMode::ECB);
-        compute_block_mode_bitmap(&mut modes, BlockMode::CTR);
-
-        assert_eq!(show_blockmode(modes), "-T-E");
-
-        // Add some bits not covered by the enum of valid bit positions.
-        modes |= 0xa0;
-        assert_eq!(show_blockmode(modes), "-T-E(full:0x000000aa)");
-        modes |= 0x300;
-        assert_eq!(show_blockmode(modes), "-T-E(full:0x000003aa)");
     }
 }

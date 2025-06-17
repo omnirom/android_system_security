@@ -1,4 +1,4 @@
-// Copyright 2023, The Android Open Source Project
+// Copyright 2024, The Android Open Source Project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,29 +22,35 @@ package {
 }
 
 rust_defaults {
-    name: "libwatchdog_defaults",
-    crate_name: "watchdog_rs",
-    srcs: ["src/lib.rs"],
+    name: "libkeystore_attestation_defaults",
+    crate_name: "keystore_attestation",
+    srcs: ["lib.rs"],
+    defaults: [
+        "keymint_use_latest_hal_aidl_rust",
+    ],
     rustlibs: [
-        "libchrono",
+        "libbinder_rs",
+        "libder",
         "liblog_rust",
+        "libspki",
+        "libx509_cert",
     ],
 }
 
 rust_library {
-    name: "libwatchdog_rs",
-    defaults: ["libwatchdog_defaults"],
-    apex_available: [
-        "//apex_available:platform",
-        "com.android.virt",
-    ],
+    name: "libkeystore_attestation",
+    defaults: ["libkeystore_attestation_defaults"],
+    vendor_available: true,
+    min_sdk_version: "35",
 }
 
 rust_test {
-    name: "libwatchdog_rs.test",
-    defaults: ["libwatchdog_defaults"],
-    test_suites: ["general-tests"],
+    name: "libkeystore_attestation_test",
+    defaults: ["libkeystore_attestation_defaults"],
     rustlibs: [
-        "libandroid_logger",
+        "libhex",
     ],
+    test_suites: ["general-tests"],
+    auto_gen_config: true,
+    compile_multilib: "first",
 }

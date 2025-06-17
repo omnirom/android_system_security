@@ -247,34 +247,6 @@ pub fn getcon() -> Result<Context> {
     }
 }
 
-/// Safe wrapper around libselinux `getpidcon`. It initializes the `Context::Raw` variant of the
-/// returned `Context`.
-///
-/// ## Return
-///  * Ok(Context::Raw()) if successful.
-///  * Err(Error::sys()) if getpidcon succeeded but returned a NULL pointer.
-///  * Err(io::Error::last_os_error()) if getpidcon failed.
-pub fn getpidcon(pid: selinux::pid_t) -> Result<Context> {
-    init_logger_once();
-    let _lock = LIB_SELINUX_LOCK.lock().unwrap();
-
-    let mut con: *mut c_char = ptr::null_mut();
-    match unsafe { selinux::getpidcon(pid, &mut con) } {
-        0 => {
-            if !con.is_null() {
-                Ok(Context::Raw(con))
-            } else {
-                Err(anyhow!(Error::sys(format!(
-                    "getpidcon returned a NULL context for pid {}",
-                    pid
-                ))))
-            }
-        }
-        _ => Err(anyhow!(io::Error::last_os_error()))
-            .context(format!("getpidcon failed for pid {}", pid)),
-    }
-}
-
 /// Safe wrapper around selinux_check_access.
 ///
 /// ## Return
@@ -795,13 +767,5 @@ mod tests {
         check_keystore_perm!(lock);
         check_keystore_perm!(reset);
         check_keystore_perm!(unlock);
-    }
-
-    #[test]
-    fn test_getpidcon() {
-        // Check that `getpidcon` of our pid is equal to what `getcon` returns.
-        // And by using `unwrap` we make sure that both also have to return successfully
-        // fully to pass the test.
-        assert_eq!(getpidcon(std::process::id() as i32).unwrap(), getcon().unwrap());
     }
 }
