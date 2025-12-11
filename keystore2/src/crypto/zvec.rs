@@ -15,6 +15,7 @@
 //! Implements ZVec, a vector that is mlocked during its lifetime and zeroed
 //! when dropped.
 
+use log::error;
 use nix::sys::mman::{mlock, munlock};
 use std::convert::TryFrom;
 use std::fmt;
@@ -82,7 +83,7 @@ impl Drop for ZVec {
                 // by `mlock` in `ZVec::new` or the `TryFrom<Vec<u8>>` implementation.
                 unsafe { munlock(NonNull::from(&self.elems).cast(), self.elems.len()) }
             {
-                log::error!("In ZVec::drop: `munlock` failed: {:?}.", e);
+                error!("In ZVec::drop: `munlock` failed: {e:?}");
             }
         }
     }

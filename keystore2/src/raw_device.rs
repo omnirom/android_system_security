@@ -141,7 +141,7 @@ impl KeyMintDevice {
     pub fn internal_descriptor(alias: String) -> KeyDescriptor {
         KeyDescriptor {
             domain: Domain::APP,
-            nspace: AID_KEYSTORE as i64,
+            nspace: AID_KEYSTORE.0,
             alias: Some(alias),
             blob: None,
         }

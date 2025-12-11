@@ -35,6 +35,9 @@
       "name": "CtsKeystorePerformanceTestCases"
     },
     {
+      "name": "keystore2_engine_tests"
+    },
+    {
       "name": "librkpd_client.test"
     },
     {

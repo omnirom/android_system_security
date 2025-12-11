@@ -70,7 +70,7 @@ fn decode_encode_alias_test() {
         let encoded = LegacyBlobLoader::encode_alias(&alias_str);
         let decoded = match LegacyBlobLoader::decode_alias(&encoded) {
             Ok(d) => d,
-            Err(_) => panic!("random_alias: {:x?}\nencoded {}", random_alias, encoded),
+            Err(_) => panic!("random_alias: {random_alias:x?}\nencoded {encoded}"),
         };
         assert_eq!(random_alias.to_vec(), decoded.bytes().collect::<Vec<u8>>());
     }
@@ -225,7 +225,7 @@ fn test_legacy_blobs() -> anyhow::Result<()> {
     let legacy_blob_loader = LegacyBlobLoader::new(temp_dir.path());
 
     if let (Some((Blob { flags, value }, _params)), Some(cert), Some(chain)) =
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &None)?
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &None)?
     {
         assert_eq!(flags, 4);
         assert_eq!(
@@ -243,7 +243,7 @@ fn test_legacy_blobs() -> anyhow::Result<()> {
     }
 
     if let (Some((Blob { flags, value: _ }, _params)), Some(cert), Some(chain)) =
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &None)?
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &None)?
     {
         assert_eq!(flags, 4);
         //assert_eq!(value, BlobValue::Encrypted(..));
@@ -253,7 +253,7 @@ fn test_legacy_blobs() -> anyhow::Result<()> {
         panic!("");
     }
     if let (Some((Blob { flags, value }, _params)), Some(cert), Some(chain)) =
-        legacy_blob_loader.load_by_uid_alias(10223, "non_authbound", &None)?
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "non_authbound", &None)?
     {
         assert_eq!(flags, 0);
         assert_eq!(value, BlobValue::Decrypted(LOADED_USRPKEY_NON_AUTHBOUND.try_into()?));
@@ -263,29 +263,33 @@ fn test_legacy_blobs() -> anyhow::Result<()> {
         panic!("");
     }
 
-    legacy_blob_loader.remove_keystore_entry(10223, "authbound").expect("This should succeed.");
-    legacy_blob_loader.remove_keystore_entry(10223, "non_authbound").expect("This should succeed.");
+    legacy_blob_loader
+        .remove_keystore_entry(AppUid(10223), "authbound")
+        .expect("This should succeed.");
+    legacy_blob_loader
+        .remove_keystore_entry(AppUid(10223), "non_authbound")
+        .expect("This should succeed.");
 
     assert_eq!(
         (None, None, None),
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &None)?
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &None)?
     );
     assert_eq!(
         (None, None, None),
-        legacy_blob_loader.load_by_uid_alias(10223, "non_authbound", &None)?
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "non_authbound", &None)?
     );
 
     // The database should not be empty due to the super key.
     assert!(!legacy_blob_loader.is_empty()?);
-    assert!(!legacy_blob_loader.is_empty_user(0)?);
+    assert!(!legacy_blob_loader.is_empty_user(AndroidUserId(0))?);
 
     // The database should be considered empty for user 1.
-    assert!(legacy_blob_loader.is_empty_user(1)?);
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(1))?);
 
-    legacy_blob_loader.remove_super_key(0);
+    legacy_blob_loader.remove_super_key(AndroidUserId(0));
 
     // Now it should be empty.
-    assert!(legacy_blob_loader.is_empty_user(0)?);
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(0))?);
     assert!(legacy_blob_loader.is_empty()?);
 
     Ok(())
@@ -344,7 +348,7 @@ fn test_with_encrypted_characteristics() -> anyhow::Result<()> {
 
     assert_eq!(
         legacy_blob_loader
-            .load_by_uid_alias(10223, "authbound", &None)
+            .load_by_uid_alias(AppUid(10223), "authbound", &None)
             .unwrap_err()
             .root_cause()
             .downcast_ref::<Error>(),
@@ -352,7 +356,7 @@ fn test_with_encrypted_characteristics() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &Some(super_key)).unwrap(),
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &Some(super_key)).unwrap(),
         (
             Some((
                 Blob {
@@ -370,24 +374,26 @@ fn test_with_encrypted_characteristics() -> anyhow::Result<()> {
         )
     );
 
-    legacy_blob_loader.remove_keystore_entry(10223, "authbound").expect("This should succeed.");
+    legacy_blob_loader
+        .remove_keystore_entry(AppUid(10223), "authbound")
+        .expect("This should succeed.");
 
     assert_eq!(
         (None, None, None),
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &None).unwrap()
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &None).unwrap()
     );
 
     // The database should not be empty due to the super key.
     assert!(!legacy_blob_loader.is_empty().unwrap());
-    assert!(!legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(!legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
 
     // The database should be considered empty for user 1.
-    assert!(legacy_blob_loader.is_empty_user(1).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(1)).unwrap());
 
-    legacy_blob_loader.remove_super_key(0);
+    legacy_blob_loader.remove_super_key(AndroidUserId(0));
 
     // Now it should be empty.
-    assert!(legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
     assert!(legacy_blob_loader.is_empty().unwrap());
 
     Ok(())
@@ -432,7 +438,7 @@ fn test_with_encrypted_certificates() -> anyhow::Result<()> {
 
     assert_eq!(
         legacy_blob_loader
-            .load_by_uid_alias(10223, "authbound", &None)
+            .load_by_uid_alias(AppUid(10223), "authbound", &None)
             .unwrap_err()
             .root_cause()
             .downcast_ref::<Error>(),
@@ -440,7 +446,7 @@ fn test_with_encrypted_certificates() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &Some(super_key)).unwrap(),
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &Some(super_key)).unwrap(),
         (
             Some((
                 Blob {
@@ -458,24 +464,26 @@ fn test_with_encrypted_certificates() -> anyhow::Result<()> {
         )
     );
 
-    legacy_blob_loader.remove_keystore_entry(10223, "authbound").expect("This should succeed.");
+    legacy_blob_loader
+        .remove_keystore_entry(AppUid(10223), "authbound")
+        .expect("This should succeed.");
 
     assert_eq!(
         (None, None, None),
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &None).unwrap()
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &None).unwrap()
     );
 
     // The database should not be empty due to the super key.
     assert!(!legacy_blob_loader.is_empty().unwrap());
-    assert!(!legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(!legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
 
     // The database should be considered empty for user 1.
-    assert!(legacy_blob_loader.is_empty_user(1).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(1)).unwrap());
 
-    legacy_blob_loader.remove_super_key(0);
+    legacy_blob_loader.remove_super_key(AndroidUserId(0));
 
     // Now it should be empty.
-    assert!(legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
     assert!(legacy_blob_loader.is_empty().unwrap());
 
     Ok(())
@@ -520,7 +528,7 @@ fn test_in_place_key_migration() -> anyhow::Result<()> {
 
     assert_eq!(
         legacy_blob_loader
-            .load_by_uid_alias(10223, "authbound", &None)
+            .load_by_uid_alias(AppUid(10223), "authbound", &None)
             .unwrap_err()
             .root_cause()
             .downcast_ref::<Error>(),
@@ -530,7 +538,7 @@ fn test_in_place_key_migration() -> anyhow::Result<()> {
     let super_key: Option<Arc<dyn AesGcm>> = Some(super_key);
 
     assert_eq!(
-        legacy_blob_loader.load_by_uid_alias(10223, "authbound", &super_key).unwrap(),
+        legacy_blob_loader.load_by_uid_alias(AppUid(10223), "authbound", &super_key).unwrap(),
         (
             Some((
                 Blob {
@@ -548,11 +556,13 @@ fn test_in_place_key_migration() -> anyhow::Result<()> {
         )
     );
 
-    legacy_blob_loader.move_keystore_entry(10223, 10224, "authbound", "boundauth").unwrap();
+    legacy_blob_loader
+        .move_keystore_entry(AppUid(10223), AppUid(10224), "authbound", "boundauth")
+        .unwrap();
 
     assert_eq!(
         legacy_blob_loader
-            .load_by_uid_alias(10224, "boundauth", &None)
+            .load_by_uid_alias(AppUid(10224), "boundauth", &None)
             .unwrap_err()
             .root_cause()
             .downcast_ref::<Error>(),
@@ -560,7 +570,7 @@ fn test_in_place_key_migration() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        legacy_blob_loader.load_by_uid_alias(10224, "boundauth", &super_key).unwrap(),
+        legacy_blob_loader.load_by_uid_alias(AppUid(10224), "boundauth", &super_key).unwrap(),
         (
             Some((
                 Blob {
@@ -578,24 +588,26 @@ fn test_in_place_key_migration() -> anyhow::Result<()> {
         )
     );
 
-    legacy_blob_loader.remove_keystore_entry(10224, "boundauth").expect("This should succeed.");
+    legacy_blob_loader
+        .remove_keystore_entry(AppUid(10224), "boundauth")
+        .expect("This should succeed.");
 
     assert_eq!(
         (None, None, None),
-        legacy_blob_loader.load_by_uid_alias(10224, "boundauth", &None).unwrap()
+        legacy_blob_loader.load_by_uid_alias(AppUid(10224), "boundauth", &None).unwrap()
     );
 
     // The database should not be empty due to the super key.
     assert!(!legacy_blob_loader.is_empty().unwrap());
-    assert!(!legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(!legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
 
     // The database should be considered empty for user 1.
-    assert!(legacy_blob_loader.is_empty_user(1).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(1)).unwrap());
 
-    legacy_blob_loader.remove_super_key(0);
+    legacy_blob_loader.remove_super_key(AndroidUserId(0));
 
     // Now it should be empty.
-    assert!(legacy_blob_loader.is_empty_user(0).unwrap());
+    assert!(legacy_blob_loader.is_empty_user(AndroidUserId(0)).unwrap());
     assert!(legacy_blob_loader.is_empty().unwrap());
 
     Ok(())
@@ -606,7 +618,7 @@ fn list_non_existing_user() -> Result<()> {
     let temp_dir = TempDir::new("list_non_existing_user").unwrap();
     let legacy_blob_loader = LegacyBlobLoader::new(temp_dir.path());
 
-    assert!(legacy_blob_loader.list_user(20)?.is_empty());
+    assert!(legacy_blob_loader.list_user(AndroidUserId(20))?.is_empty());
 
     Ok(())
 }
@@ -616,7 +628,9 @@ fn list_legacy_keystore_entries_on_non_existing_user() -> Result<()> {
     let temp_dir = TempDir::new("list_legacy_keystore_entries_on_non_existing_user").unwrap();
     let legacy_blob_loader = LegacyBlobLoader::new(temp_dir.path());
 
-    assert!(legacy_blob_loader.list_legacy_keystore_entries_for_user(20)?.is_empty());
+    assert!(legacy_blob_loader
+        .list_legacy_keystore_entries_for_user(AndroidUserId(20))?
+        .is_empty());
 
     Ok(())
 }
@@ -638,8 +652,8 @@ fn test_move_keystore_entry() {
 
     // Non existent source id silently ignored.
     assert!(LegacyBlobLoader::move_keystore_file_if_exists(
-        1,
-        2,
+        AppUid(1),
+        AppUid(2),
         "non_existent",
         ANOTHER_FILENAME,
         "ignored",
@@ -657,8 +671,8 @@ fn test_move_keystore_entry() {
     // Existing target files are silently overwritten.
 
     assert!(LegacyBlobLoader::move_keystore_file_if_exists(
-        1,
-        2,
+        AppUid(1),
+        AppUid(2),
         SOME_FILENAME,
         ANOTHER_FILENAME,
         "ignored",

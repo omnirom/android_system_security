@@ -1610,6 +1610,7 @@ fn keystore2_rsa_generate_keys() {
         KeyPurpose::DECRYPT,
         ForcedOp(false),
     ));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE), result.unwrap_err());
 }
@@ -1638,6 +1639,7 @@ fn keystore2_rsa_encrypt_key_op_invalid_purpose() {
         KeyPurpose::SIGN,
         ForcedOp(false),
     ));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
 }
@@ -1666,6 +1668,7 @@ fn keystore2_rsa_sign_key_op_invalid_purpose() {
         KeyPurpose::DECRYPT,
         ForcedOp(false),
     ));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
 }
@@ -1694,6 +1697,7 @@ fn keystore2_rsa_key_unsupported_purpose() {
         KeyPurpose::AGREE_KEY,
         ForcedOp(false),
     ));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PURPOSE), result.unwrap_err());
 }
@@ -1725,6 +1729,7 @@ fn keystore2_rsa_encrypt_key_unsupported_padding() {
             KeyPurpose::DECRYPT,
             ForcedOp(false),
         ));
+        delete_app_key(&sl.keystore2, &alias).unwrap();
         assert!(result.is_err());
         assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE), result.unwrap_err());
     }
@@ -1757,6 +1762,7 @@ fn keystore2_rsa_signing_key_unsupported_padding() {
             KeyPurpose::SIGN,
             ForcedOp(false),
         ));
+        delete_app_key(&sl.keystore2, &alias).unwrap();
         assert!(result.is_err());
         assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE), result.unwrap_err());
     }
@@ -1788,6 +1794,7 @@ fn keystore2_rsa_key_unsupported_op() {
         ForcedOp(false),
     ));
 
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PURPOSE), result.unwrap_err());
 }
@@ -1818,6 +1825,7 @@ fn keystore2_rsa_key_missing_purpose() {
         ForcedOp(false),
     ));
 
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
 }
@@ -1847,6 +1855,7 @@ fn keystore2_rsa_gen_keys_with_oaep_paddings_without_digest() {
         ForcedOp(false),
     ));
 
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_DIGEST), result.unwrap_err());
 }

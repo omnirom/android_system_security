@@ -34,6 +34,7 @@ use android_system_keystore2::binder::{
     ExceptionCode, Result as BinderResult, Status as BinderStatus, StatusCode,
 };
 use keystore2_selinux as selinux;
+use log::{error, warn};
 use postprocessor_client::Error as PostProcessorError;
 use rkpd_client::Error as RkpdError;
 use std::cmp::PartialEq;
@@ -89,7 +90,7 @@ impl From<RkpdError> for Error {
                         ResponseCode::OUT_OF_KEYS_REQUIRES_SYSTEM_UPGRADE
                     }
                     _ => {
-                        log::error!("Unexpected get key error from rkpd: {e:?}");
+                        error!("Unexpected get key error from rkpd: {e:?}");
                         ResponseCode::OUT_OF_KEYS_TRANSIENT_ERROR
                     }
                 };
@@ -117,7 +118,7 @@ pub fn wrapped_rkpd_error_to_ks_error(e: &anyhow::Error) -> Error {
     match e.downcast_ref::<RkpdError>() {
         Some(e) => Error::from(*e),
         None => {
-            log::error!("Failed to downcast the anyhow::Error to rkpd_client::Error: {e:?}");
+            error!("Failed to downcast the anyhow::Error to rkpd_client::Error: {e:?}");
             Error::Rc(ResponseCode::SYSTEM_ERROR)
         }
     }
@@ -180,7 +181,7 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
         e.root_cause().downcast_ref::<Error>(),
         Some(Error::Rc(ResponseCode::KEY_NOT_FOUND))
     ) {
-        log::error!("{:?}", e);
+        error!("{e:?}");
     }
     into_binder(e)
 }
@@ -190,10 +191,10 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
 /// If the formatted string was not convertible because it contained a nul byte,
 /// None is returned and a warning is logged.
 pub fn anyhow_error_to_cstring(e: &anyhow::Error) -> Option<CString> {
-    match CString::new(format!("{:?}", e)) {
+    match CString::new(format!("{e:?}")) {
         Ok(msg) => Some(msg),
         Err(_) => {
-            log::warn!("Cannot convert error message to CStr. It contained a nul byte.");
+            warn!("Cannot convert error message to CStr. It contained a nul byte.");
             None
         }
     }

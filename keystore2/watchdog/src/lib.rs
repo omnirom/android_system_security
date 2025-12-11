@@ -17,15 +17,14 @@
 
 //! This module implements a watchdog thread.
 
+use log::{info, warn};
 use std::{
     cmp::min,
     collections::HashMap,
+    marker::PhantomData,
     sync::Arc,
     sync::{Condvar, Mutex, MutexGuard},
     thread,
-};
-use std::{
-    marker::PhantomData,
     time::{Duration, Instant},
 };
 
@@ -140,7 +139,7 @@ impl WatchdogState {
         }
         self.update_noisy_timeout();
         self.last_report = Some(Instant::now());
-        log::warn!("### Keystore Watchdog report - BEGIN ###");
+        warn!("### Keystore Watchdog report - BEGIN ###");
 
         let now = Instant::now();
         let mut overdue_records: Vec<(&Index, &Record)> = self
@@ -149,13 +148,8 @@ impl WatchdogState {
             .filter(|(_, r)| r.deadline.saturating_duration_since(now) == Duration::new(0, 0))
             .collect();
 
-        log::warn!(
-            concat!(
-                "When extracting from a bug report, please include this header ",
-                "and all {} records below (to footer)"
-            ),
-            overdue_records.len()
-        );
+        warn!("When extracting from a bug report, please include this header");
+        warn!("and all {} records below.", overdue_records.len());
 
         // Watch points can be nested, i.e., a single thread may have multiple armed
         // watch points. And the most recent on each thread (thread recent) is closest to the point
@@ -185,7 +179,7 @@ impl WatchdogState {
             for (i, r) in g.iter() {
                 match &r.context {
                     Some(ctx) => {
-                        log::warn!(
+                        warn!(
                             "{:?} {} Started: {} Pending: {:?} Overdue {:?} for {:?}",
                             i.tid,
                             i.id,
@@ -196,7 +190,7 @@ impl WatchdogState {
                         );
                     }
                     None => {
-                        log::warn!(
+                        warn!(
                             "{:?} {} Started: {} Pending: {:?} Overdue {:?}",
                             i.tid,
                             i.id,
@@ -208,7 +202,7 @@ impl WatchdogState {
                 }
             }
         }
-        log::warn!("### Keystore Watchdog report - END ###");
+        warn!("### Keystore Watchdog report - END ###");
     }
 
     fn disarm(&mut self, index: Index) {
@@ -242,7 +236,7 @@ impl WatchdogState {
 
     fn arm(&mut self, index: Index, record: Record) {
         if self.records.insert(index.clone(), record).is_some() {
-            log::warn!("Recursive watchdog record at \"{:?}\" replaces previous record.", index);
+            warn!("Recursive watchdog record at \"{index:?}\" replaces previous record.");
         }
     }
 }
@@ -281,8 +275,8 @@ impl Watchdog {
         timeout: Duration,
     ) -> Option<WatchPoint> {
         let Some(deadline) = Instant::now().checked_add(timeout) else {
-            log::warn!("Deadline computation failed for WatchPoint \"{}\"", id);
-            log::warn!("WatchPoint not armed.");
+            warn!("Deadline computation failed for WatchPoint \"{id}\"");
+            warn!("WatchPoint not armed.");
             return None;
         };
         wd.arm(context, id, deadline);
@@ -374,7 +368,7 @@ impl Watchdog {
                     break;
                 }
             }
-            log::info!("Watchdog thread idle -> terminating. Have a great day.");
+            info!("Watchdog thread idle -> terminating. Have a great day.");
         }));
         state.state = State::Running;
     }

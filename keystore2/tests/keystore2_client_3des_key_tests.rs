@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
+    delete_app_key, perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op,
+    SAMPLE_PLAIN_TEXT,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, BlockMode::BlockMode, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
@@ -64,6 +65,7 @@ fn create_3des_key_and_operation(
         &key_metadata.key,
     )
     .unwrap();
+    delete_app_key(&sl.keystore2, &alias).unwrap();
     assert!(plain_text.is_some());
     assert_eq!(plain_text.unwrap(), SAMPLE_PLAIN_TEXT.to_vec());
     Ok(())
@@ -152,6 +154,7 @@ fn keystore2_3des_key_fails_missing_padding() {
         &op_params,
         false,
     ));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_PADDING_MODE), result.unwrap_err());
 }
@@ -190,6 +193,7 @@ fn keystore2_3des_key_encrypt_fails_invalid_input_length() {
     // length of input.
     let invalid_block_size_msg = b"my message 111";
     let result = key_generations::map_ks_error(op.finish(Some(invalid_block_size_msg), None));
+    delete_app_key(&sl.keystore2, alias).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_INPUT_LENGTH), result.unwrap_err());
 }

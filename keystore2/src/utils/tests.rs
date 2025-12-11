@@ -123,3 +123,21 @@ fn test_list_key_parameters_with_filter_on_security_sensitive_info() -> Result<(
     assert_eq!(log_security_safe_params(&params), wanted);
     Ok(())
 }
+
+#[test]
+fn test_target_sdk_for_uid() -> Result<()> {
+    init_test_logging();
+    assert!(target_sdk_for_uid(AppUid(999_999)).is_none());
+
+    // Try retrieving some system uids; these generally map to a "shared:<pkgname>" that does not
+    // have target SDK information.
+    for uid in [
+        AID_SYSTEM,   // AID_SYSTEM => "shared:android.uid.system"
+        AppUid(1001), // AID_RADIO => "shared:android.uid.phone"
+        AppUid(1073), // AID_NETWORK_STACK => "shared:android.uid.networkstack"
+    ] {
+        let target_sdk = target_sdk_for_uid(uid);
+        log::info!("{uid:?} => {target_sdk:?}");
+    }
+    Ok(())
+}

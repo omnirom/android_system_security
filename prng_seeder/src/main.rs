@@ -101,7 +101,7 @@ async fn listen_loop(cb: ConditionerBuilder, listener: UnixListener) -> Result<I
                 let new_bytes = conditioner.request()?;
                 tokio::spawn(async move {
                     if let Err(e) = stream.write_all(&new_bytes).await {
-                        error!("Request failed: {}", e);
+                        error!("Request failed: {e}");
                     }
                 });
                 conditioner.reseed_if_necessary().await?;
@@ -117,9 +117,9 @@ fn run() -> Result<Infallible> {
         Ok(t) => t,
         Err(e) => {
             // If setup fails, just hang forever. That way init doesn't respawn us.
-            error!("Hanging forever because setup failed: {:?}", e);
+            error!("Hanging forever because setup failed: {e:?}");
             // Logs are sometimes mysteriously not being logged, so print too
-            println!("prng_seeder: Hanging forever because setup failed: {:?}", e);
+            println!("prng_seeder: Hanging forever because setup failed: {e:?}");
             loop {
                 std::thread::park();
                 error!("std::thread::park() finished unexpectedly, re-parking thread");
@@ -136,9 +136,9 @@ fn run() -> Result<Infallible> {
 
 fn main() {
     let e = run();
-    error!("Launch terminated: {:?}", e);
+    error!("Launch terminated: {e:?}");
     // Logs are sometimes mysteriously not being logged, so print too
-    println!("prng_seeder: launch terminated: {:?}", e);
+    println!("prng_seeder: launch terminated: {e:?}");
     std::process::exit(-1);
 }
 

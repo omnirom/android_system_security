@@ -23,7 +23,6 @@
 #include <aidl/android/hardware/security/keymint/ErrorCode.h>
 #include <aidl/android/hardware/security/keymint/KeyParameterValue.h>
 #include <aidl/android/hardware/security/keymint/PaddingMode.h>
-#include <aidl/android/system/keystore2/ResponseCode.h>
 #include <android-base/logging.h>
 #include <android/hidl/manager/1.2/IServiceManager.h>
 #include <binder/IServiceManager.h>
@@ -42,7 +41,6 @@ using ::aidl::android::hardware::security::keymint::Digest;
 using ::aidl::android::hardware::security::keymint::KeyParameterValue;
 using ::aidl::android::hardware::security::keymint::PaddingMode;
 using ::aidl::android::hardware::security::keymint::Tag;
-using ::aidl::android::system::keystore2::ResponseCode;
 using ::android::hardware::hidl_vec;
 using ::android::hardware::keymaster::V4_0::TagType;
 using ::android::hidl::manager::V1_2::IServiceManager;
@@ -1575,10 +1573,14 @@ std::shared_ptr<SecureClock> SecureClock::createSecureClock(KeyMintSecurityLevel
 ScopedAStatus
 KeystoreCompatService::getKeyMintDevice(KeyMintSecurityLevel in_securityLevel,
                                         std::shared_ptr<IKeyMintDevice>* _aidl_return) {
+    LOG(INFO) << "KeystoreCompatService::getKeyMintDevice(" << toString(in_securityLevel) << ")";
     auto i = mDeviceCache.find(in_securityLevel);
     if (i == mDeviceCache.end()) {
+        LOG(INFO) << "createMintDevice(" << toString(in_securityLevel) << ")";
         auto device = KeyMintDevice::createKeyMintDevice(in_securityLevel);
         if (!device) {
+            LOG(INFO) << "failed to create compat KeyMint device for "
+                      << toString(in_securityLevel);
             return ScopedAStatus::fromStatus(STATUS_NAME_NOT_FOUND);
         }
         i = mDeviceCache.insert(i, {in_securityLevel, std::move(device)});
@@ -1589,10 +1591,13 @@ KeystoreCompatService::getKeyMintDevice(KeyMintSecurityLevel in_securityLevel,
 
 ScopedAStatus KeystoreCompatService::getSharedSecret(KeyMintSecurityLevel in_securityLevel,
                                                      std::shared_ptr<ISharedSecret>* _aidl_return) {
+    LOG(INFO) << "KeystoreCompatService::getSharedSecret(" << toString(in_securityLevel) << ")";
     auto i = mSharedSecretCache.find(in_securityLevel);
     if (i == mSharedSecretCache.end()) {
         auto secret = SharedSecret::createSharedSecret(in_securityLevel);
         if (!secret) {
+            LOG(INFO) << "failed to create compat SharedSecret device for "
+                      << toString(in_securityLevel);
             return ScopedAStatus::fromStatus(STATUS_NAME_NOT_FOUND);
         }
         i = mSharedSecretCache.insert(i, {in_securityLevel, std::move(secret)});
@@ -1602,14 +1607,33 @@ ScopedAStatus KeystoreCompatService::getSharedSecret(KeyMintSecurityLevel in_sec
 }
 
 ScopedAStatus KeystoreCompatService::getSecureClock(std::shared_ptr<ISecureClock>* _aidl_return) {
+    LOG(INFO) << "KeystoreCompatService::getSecureClock()";
     if (!mSecureClock) {
         // The legacy verification service was always provided by the TEE variant.
         auto clock = SecureClock::createSecureClock(KeyMintSecurityLevel::TRUSTED_ENVIRONMENT);
         if (!clock) {
+            LOG(WARNING) << "failed to create compat SecureClock device";
             return ScopedAStatus::fromStatus(STATUS_NAME_NOT_FOUND);
         }
         mSecureClock = std::move(clock);
     }
     *_aidl_return = mSecureClock;
     return ScopedAStatus::ok();
+}
+
+binder_status_t KeystoreCompatService::dump(int fd, const char** /* args */,
+                                            uint32_t /* numArgs */) {
+    dprintf(fd, "KeystoreCompatService:\n\n");
+
+    dprintf(fd, "  Cached KeyMint instances:\n");
+    for (const auto& it : mDeviceCache) {
+        dprintf(fd, "    sec_level=%d\n", it.first);
+    }
+    dprintf(fd, "  Cached SharedSecret instances:\n");
+    for (const auto& it : mSharedSecretCache) {
+        dprintf(fd, "    sec_level=%d\n", it.first);
+    }
+    dprintf(fd, "  Cached SecureClock available: %s\n",
+            (mSecureClock != nullptr) ? "true" : "false");
+    return STATUS_OK;
 }

@@ -21,7 +21,7 @@ use crate::error::{Error, ErrorCode};
 use crate::ks_err;
 use crate::permission::KeyPerm;
 use crate::remote_provisioning::RemProvState;
-use crate::utils::check_key_permission;
+use crate::utils::{check_key_permission, AppUid};
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     AttestationKey::AttestationKey, KeyParameter::KeyParameter, Tag::Tag,
 };
@@ -53,7 +53,7 @@ pub enum AttestationKeyInfo {
 /// it loads the user generated attestation key from the database.
 pub fn get_attest_key_info(
     key: &KeyDescriptor,
-    caller_uid: u32,
+    caller_uid: AppUid,
     attest_key_descriptor: Option<&KeyDescriptor>,
     params: &[KeyParameter],
     rem_prov_state: &RemProvState,
@@ -81,7 +81,7 @@ pub fn get_attest_key_info(
 
 fn get_user_generated_attestation_key(
     key: &KeyDescriptor,
-    caller_uid: u32,
+    caller_uid: AppUid,
     db: &mut KeystoreDB,
 ) -> Result<AttestationKeyInfo> {
     let (key_id_guard, blob, cert, blob_metadata) =
@@ -96,7 +96,7 @@ fn get_user_generated_attestation_key(
 
 fn load_attest_key_blob_and_cert(
     key: &KeyDescriptor,
-    caller_uid: u32,
+    caller_uid: AppUid,
     db: &mut KeystoreDB,
 ) -> Result<(KeyIdGuard, Vec<u8>, Vec<u8>, BlobMetaData)> {
     match key.domain {

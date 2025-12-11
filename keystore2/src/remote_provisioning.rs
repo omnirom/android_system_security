@@ -19,23 +19,24 @@
 //! certificate chains signed by some root authority and stored in a keystore SQLite
 //! DB.
 
+use crate::error::wrapped_rkpd_error_to_ks_error;
+use crate::globals::get_remotely_provisioned_component_name;
+use crate::ks_err;
+use crate::metrics_store::log_rkp_error_stats;
+use crate::utils::AppUid;
+use crate::watchdog_helper::watchdog as wd;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, AttestationKey::AttestationKey, KeyParameter::KeyParameter,
     KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
 };
+use android_security_metrics::aidl::android::security::metrics::RkpError::RkpError as MetricsRkpError;
 use android_security_rkp_aidl::aidl::android::security::rkp::RemotelyProvisionedKey::RemotelyProvisionedKey;
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor,
 };
 use anyhow::{Context, Result};
 use keystore2_crypto::parse_subject_from_certificate;
-
-use crate::error::wrapped_rkpd_error_to_ks_error;
-use crate::globals::get_remotely_provisioned_component_name;
-use crate::ks_err;
-use crate::metrics_store::log_rkp_error_stats;
-use crate::watchdog_helper::watchdog as wd;
-use android_security_metrics::aidl::android::security::metrics::RkpError::RkpError as MetricsRkpError;
+use log::{error, warn};
 
 /// Contains helper functions to check if remote provisioning is enabled on the system and, if so,
 /// to assign and retrieve attestation keys and certificate chains.
@@ -82,7 +83,7 @@ impl RemProvState {
     pub fn get_rkpd_attestation_key_and_certs(
         &self,
         key: &KeyDescriptor,
-        caller_uid: u32,
+        caller_uid: AppUid,
         params: &[KeyParameter],
     ) -> Result<Option<(AttestationKey, Vec<u8>)>> {
         if !self.is_asymmetric_key(params) || key.domain != Domain::APP {
@@ -91,10 +92,10 @@ impl RemProvState {
             match get_rkpd_attestation_key(&self.security_level, caller_uid) {
                 Err(e) => {
                     if self.is_rkp_only() {
-                        log::error!("Error occurred: {:?}", e);
+                        error!("Failed to get rkpd key: {e:?}");
                         return Err(wrapped_rkpd_error_to_ks_error(&e)).context(format!("{e:?}"));
                     }
-                    log::warn!("Error occurred: {:?}", e);
+                    warn!("Failed to get rkpd key: {e:?}");
                     log_rkp_error_stats(
                         MetricsRkpError::FALL_BACK_DURING_HYBRID,
                         &self.security_level,
@@ -121,7 +122,7 @@ impl RemProvState {
 
 fn get_rkpd_attestation_key(
     security_level: &SecurityLevel,
-    caller_uid: u32,
+    caller_uid: AppUid,
 ) -> Result<RemotelyProvisionedKey> {
     // Depending on the Android release, RKP may not have been mandatory for the
     // TEE or StrongBox KM instances. In such cases, lookup failure for the IRPC
@@ -130,5 +131,5 @@ fn get_rkpd_attestation_key(
     let rpc_name = get_remotely_provisioned_component_name(security_level)
         .context(ks_err!("Trying to get IRPC name."))?;
     let _wd = wd::watch_millis("Calling get_rkpd_attestation_key()", 1000);
-    rkpd_client::get_rkpd_attestation_key(&rpc_name, caller_uid)
+    rkpd_client::get_rkpd_attestation_key(&rpc_name, caller_uid.0 as u32)
 }

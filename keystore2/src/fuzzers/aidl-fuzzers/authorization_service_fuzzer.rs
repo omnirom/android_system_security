@@ -23,7 +23,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let authorization_service = AuthorizationManager::new_native_binder().unwrap_or_else(|e| {
-        panic!("Failed to create android.security.authorization service because of {:?}", e);
+        panic!("Failed to create android.security.authorization service because of {e:?}");
     });
     fuzz_service(&mut authorization_service.as_binder(), data);
 });

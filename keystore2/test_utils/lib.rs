@@ -14,11 +14,11 @@
 
 //! Implements TempDir which aids in creating an cleaning up temporary directories for testing.
 
+use log::info;
 use std::fs::{create_dir, remove_dir_all};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{env::temp_dir, ops::Deref};
-
 use android_system_keystore2::aidl::android::system::keystore2::{
     IKeystoreService::IKeystoreService,
     IKeystoreSecurityLevel::IKeystoreSecurityLevel, KeyDescriptor::KeyDescriptor,
@@ -53,7 +53,7 @@ impl TempDir {
         let tmp = loop {
             let mut tmp = temp_dir();
             let number: u16 = rand::random();
-            tmp.push(format!("{}_{:05}", prefix, number));
+            tmp.push(format!("{prefix}_{number:05}"));
             match create_dir(&tmp) {
                 Err(e) => match e.kind() {
                     ErrorKind::AlreadyExists => continue,
@@ -88,7 +88,7 @@ impl TempDir {
     #[allow(dead_code)]
     pub fn do_not_drop(&mut self) {
         println!("Disabled automatic cleanup for: {:?}", self.path);
-        log::info!("Disabled automatic cleanup for: {:?}", self.path);
+        info!("Disabled automatic cleanup for: {:?}", self.path);
         self.do_drop = false;
     }
 }

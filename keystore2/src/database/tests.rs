@@ -15,14 +15,14 @@
 //! Database tests.
 
 use super::*;
+use super::utils as db_utils;
 use crate::key_parameter::{
     Algorithm, BlockMode, Digest, EcCurve, HardwareAuthenticatorType, KeyOrigin, KeyParameter,
     KeyParameterValue, KeyPurpose, PaddingMode, SecurityLevel,
 };
 use crate::key_perm_set;
 use crate::permission::{KeyPerm, KeyPermSet};
-use crate::super_key::{SuperKeyManager, USER_AFTER_FIRST_UNLOCK_SUPER_KEY, SuperEncryptionAlgorithm, SuperKeyType};
-use keystore2_test_utils::TempDir;
+use crate::super_key::{SuperKeyManager, CREDENTIAL_ENCRYPTED_SUPER_KEY, SuperEncryptionAlgorithm, SuperKeyType};
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken,
     HardwareAuthenticatorType::HardwareAuthenticatorType as kmhw_authenticator_type,
@@ -30,6 +30,8 @@ use android_hardware_security_keymint::aidl::android::hardware::security::keymin
 use android_hardware_security_secureclock::aidl::android::hardware::security::secureclock::{
     Timestamp::Timestamp,
 };
+use keystore2_test_utils::TempDir;
+use keystore2_flags;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -37,7 +39,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
-use crate::utils::AesGcm;
+use crate::utils::{init_test_logging, AesGcm};
 #[cfg(disabled)]
 use std::time::Instant;
 
@@ -310,8 +312,8 @@ fn test_rebind_alias() -> Result<()> {
 
 #[test]
 fn test_grant_ungrant() -> Result<()> {
-    const CALLER_UID: u32 = 15;
-    const GRANTEE_UID: u32 = 12;
+    const CALLER_UID: AppUid = AppUid(15);
+    const GRANTEE_UID: AppUid = AppUid(12);
     const SELINUX_NAMESPACE: i64 = 7;
 
     let mut db = new_test_db()?;
@@ -342,7 +344,7 @@ fn test_grant_ungrant() -> Result<()> {
                 KeyDescriptor {
                     domain: super::Domain::APP,
                     // namespace must be set to the caller_uid.
-                    nspace: CALLER_UID as i64,
+                    nspace: CALLER_UID.0,
                     alias: Some("key".to_string()),
                     blob: None,
                 }
@@ -370,7 +372,7 @@ fn test_grant_ungrant() -> Result<()> {
     };
 
     let selinux_granted_key = db
-        .grant(&selinux_key, CALLER_UID, 12, PVEC1, |k, a| {
+        .grant(&selinux_key, CALLER_UID, AppUid(12), PVEC1, |k, a| {
             assert_eq!(*a, PVEC1);
             assert_eq!(
                 *k,
@@ -400,7 +402,7 @@ fn test_grant_ungrant() -> Result<()> {
 
     // This should update the existing grant with PVEC2.
     let selinux_granted_key = db
-        .grant(&selinux_key, CALLER_UID, 12, PVEC2, |k, a| {
+        .grant(&selinux_key, CALLER_UID, AppUid(12), PVEC2, |k, a| {
             assert_eq!(*a, PVEC2);
             assert_eq!(
                 *k,
@@ -433,20 +435,20 @@ fn test_grant_ungrant() -> Result<()> {
         let mut stmt = db
             .conn
             .prepare("SELECT id, grantee, keyentryid, access_vector FROM persistent.grant;")?;
-        let mut rows = stmt.query_map::<(i64, u32, i64, KeyPermSet), _, _>([], |row| {
+        let mut rows = stmt.query_map::<(i64, i64, i64, KeyPermSet), _, _>([], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, KeyPermSet::from(row.get::<_, i32>(3)?)))
         })?;
 
         let r = rows.next().unwrap().unwrap();
-        assert_eq!(r, (next_random, GRANTEE_UID, 1, PVEC1));
+        assert_eq!(r, (next_random, GRANTEE_UID.0, 1, PVEC1));
         let r = rows.next().unwrap().unwrap();
-        assert_eq!(r, (next_random + 1, GRANTEE_UID, 2, PVEC2));
+        assert_eq!(r, (next_random + 1, GRANTEE_UID.0, 2, PVEC2));
         assert!(rows.next().is_none());
     }
 
     debug_dump_keyentry_table(&mut db)?;
-    println!("app_key {:?}", app_key);
-    println!("selinux_key {:?}", selinux_key);
+    println!("app_key {app_key:?}");
+    println!("selinux_key {selinux_key:?}");
 
     db.ungrant(&app_key, CALLER_UID, GRANTEE_UID, |_| Ok(()))?;
     db.ungrant(&selinux_key, CALLER_UID, GRANTEE_UID, |_| Ok(()))?;
@@ -514,7 +516,7 @@ fn test_insert_and_load_full_keyentry_domain_app() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::BOTH,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap();
@@ -528,7 +530,7 @@ fn test_insert_and_load_full_keyentry_domain_app() -> Result<()> {
             blob: None,
         },
         KeyType::Client,
-        1,
+        AppUid(1),
         |_, _| Ok(()),
     )
     .unwrap();
@@ -544,7 +546,7 @@ fn test_insert_and_load_full_keyentry_domain_app() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::NONE,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap_err()
@@ -582,7 +584,7 @@ fn test_insert_and_load_certificate_entry_domain_app() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::PUBLIC,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .expect("Trying to read certificate entry.");
@@ -599,7 +601,7 @@ fn test_insert_and_load_certificate_entry_domain_app() -> Result<()> {
             blob: None,
         },
         KeyType::Client,
-        1,
+        AppUid(1),
         |_, _| Ok(()),
     )
     .unwrap();
@@ -615,7 +617,7 @@ fn test_insert_and_load_certificate_entry_domain_app() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::NONE,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap_err()
@@ -642,7 +644,7 @@ fn test_insert_and_load_full_keyentry_domain_selinux() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::BOTH,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap();
@@ -656,7 +658,7 @@ fn test_insert_and_load_full_keyentry_domain_selinux() -> Result<()> {
             blob: None,
         },
         KeyType::Client,
-        1,
+        AppUid(1),
         |_, _| Ok(()),
     )
     .unwrap();
@@ -672,7 +674,7 @@ fn test_insert_and_load_full_keyentry_domain_selinux() -> Result<()> {
             },
             KeyType::Client,
             KeyEntryLoadBits::NONE,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap_err()
@@ -694,7 +696,7 @@ fn test_insert_and_load_full_keyentry_domain_key_id() -> Result<()> {
             &KeyDescriptor { domain: Domain::KEY_ID, nspace: key_id, alias: None, blob: None },
             KeyType::Client,
             KeyEntryLoadBits::BOTH,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap();
@@ -704,7 +706,7 @@ fn test_insert_and_load_full_keyentry_domain_key_id() -> Result<()> {
     db.unbind_key(
         &KeyDescriptor { domain: Domain::KEY_ID, nspace: key_id, alias: None, blob: None },
         KeyType::Client,
-        1,
+        AppUid(1),
         |_, _| Ok(()),
     )
     .unwrap();
@@ -715,7 +717,7 @@ fn test_insert_and_load_full_keyentry_domain_key_id() -> Result<()> {
             &KeyDescriptor { domain: Domain::KEY_ID, nspace: key_id, alias: None, blob: None },
             KeyType::Client,
             KeyEntryLoadBits::NONE,
-            1,
+            AppUid(1),
             |_k, _av| Ok(()),
         )
         .unwrap_err()
@@ -739,7 +741,7 @@ fn test_check_and_update_key_usage_count_with_limited_use_key() -> Result<()> {
         &KeyDescriptor { domain: Domain::KEY_ID, nspace: key_id, alias: None, blob: None },
         KeyType::Client,
         KeyEntryLoadBits::BOTH,
-        1,
+        AppUid(1),
         |_k, _av| Ok(()),
     )?;
 
@@ -789,8 +791,8 @@ fn test_insert_and_load_full_keyentry_from_grant() -> Result<()> {
                 alias: Some(TEST_ALIAS.to_string()),
                 blob: None,
             },
-            1,
-            2,
+            AppUid(1),
+            AppUid(2),
             key_perm_set![KeyPerm::Use],
             |_k, _av| Ok(()),
         )
@@ -799,25 +801,35 @@ fn test_insert_and_load_full_keyentry_from_grant() -> Result<()> {
     debug_dump_grant_table(&mut db)?;
 
     let (_key_guard, key_entry) = db
-        .load_key_entry(&granted_key, KeyType::Client, KeyEntryLoadBits::BOTH, 2, |k, av| {
-            assert_eq!(Domain::GRANT, k.domain);
-            assert!(av.unwrap().includes(KeyPerm::Use));
-            Ok(())
-        })
+        .load_key_entry(
+            &granted_key,
+            KeyType::Client,
+            KeyEntryLoadBits::BOTH,
+            AppUid(2),
+            |k, av| {
+                assert_eq!(Domain::GRANT, k.domain);
+                assert!(av.unwrap().includes(KeyPerm::Use));
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert_eq!(key_entry, make_test_key_entry_test_vector(key_id, None));
 
-    db.unbind_key(&granted_key, KeyType::Client, 2, |_, _| Ok(())).unwrap();
+    db.unbind_key(&granted_key, KeyType::Client, AppUid(2), |_, _| Ok(())).unwrap();
 
     assert_eq!(
         Some(&KsError::Rc(ResponseCode::KEY_NOT_FOUND)),
-        db.load_key_entry(&granted_key, KeyType::Client, KeyEntryLoadBits::NONE, 2, |_k, _av| Ok(
-            ()
-        ),)
-            .unwrap_err()
-            .root_cause()
-            .downcast_ref::<KsError>()
+        db.load_key_entry(
+            &granted_key,
+            KeyType::Client,
+            KeyEntryLoadBits::NONE,
+            AppUid(2),
+            |_k, _av| Ok(()),
+        )
+        .unwrap_err()
+        .root_cause()
+        .downcast_ref::<KsError>()
     );
 
     Ok(())
@@ -828,10 +840,10 @@ fn test_insert_and_load_full_keyentry_from_grant() -> Result<()> {
 #[test]
 fn test_insert_and_load_full_keyentry_from_grant_by_key_id() -> Result<()> {
     let mut db = new_test_db()?;
-    const OWNER_UID: u32 = 1u32;
-    const GRANTEE_UID: u32 = 2u32;
-    const SOMEONE_ELSE_UID: u32 = 3u32;
-    let key_id = make_test_key_entry(&mut db, Domain::APP, OWNER_UID as i64, TEST_ALIAS, None)
+    const OWNER_UID: AppUid = AppUid(1);
+    const GRANTEE_UID: AppUid = AppUid(2);
+    const SOMEONE_ELSE_UID: AppUid = AppUid(3);
+    let key_id = make_test_key_entry(&mut db, Domain::APP, OWNER_UID.0, TEST_ALIAS, None)
         .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?
         .0;
 
@@ -862,7 +874,7 @@ fn test_insert_and_load_full_keyentry_from_grant_by_key_id() -> Result<()> {
             GRANTEE_UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(OWNER_UID as i64, k.nspace);
+                assert_eq!(OWNER_UID.0, k.nspace);
                 assert!(av.unwrap().includes(KeyPerm::Use));
                 Ok(())
             },
@@ -879,7 +891,7 @@ fn test_insert_and_load_full_keyentry_from_grant_by_key_id() -> Result<()> {
             SOMEONE_ELSE_UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(OWNER_UID as i64, k.nspace);
+                assert_eq!(OWNER_UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -912,13 +924,12 @@ fn test_insert_and_load_full_keyentry_from_grant_by_key_id() -> Result<()> {
 #[test]
 fn test_migrate_key_app_to_app() -> Result<()> {
     let mut db = new_test_db()?;
-    const SOURCE_UID: u32 = 1u32;
-    const DESTINATION_UID: u32 = 2u32;
+    const SOURCE_UID: AppUid = AppUid(1);
+    const DESTINATION_UID: AppUid = AppUid(2);
     static SOURCE_ALIAS: &str = "SOURCE_ALIAS";
     static DESTINATION_ALIAS: &str = "DESTINATION_ALIAS";
-    let key_id_guard =
-        make_test_key_entry(&mut db, Domain::APP, SOURCE_UID as i64, SOURCE_ALIAS, None)
-            .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
+    let key_id_guard = make_test_key_entry(&mut db, Domain::APP, SOURCE_UID.0, SOURCE_ALIAS, None)
+        .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
 
     let source_descriptor: KeyDescriptor = KeyDescriptor {
         domain: Domain::APP,
@@ -947,7 +958,7 @@ fn test_migrate_key_app_to_app() -> Result<()> {
             DESTINATION_UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(DESTINATION_UID as i64, k.nspace);
+                assert_eq!(DESTINATION_UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -978,14 +989,13 @@ fn test_migrate_key_app_to_app() -> Result<()> {
 #[test]
 fn test_migrate_key_app_to_selinux() -> Result<()> {
     let mut db = new_test_db()?;
-    const SOURCE_UID: u32 = 1u32;
-    const DESTINATION_UID: u32 = 2u32;
+    const SOURCE_UID: AppUid = AppUid(1);
+    const DESTINATION_UID: AppUid = AppUid(2);
     const DESTINATION_NAMESPACE: i64 = 1000i64;
     static SOURCE_ALIAS: &str = "SOURCE_ALIAS";
     static DESTINATION_ALIAS: &str = "DESTINATION_ALIAS";
-    let key_id_guard =
-        make_test_key_entry(&mut db, Domain::APP, SOURCE_UID as i64, SOURCE_ALIAS, None)
-            .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
+    let key_id_guard = make_test_key_entry(&mut db, Domain::APP, SOURCE_UID.0, SOURCE_ALIAS, None)
+        .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
 
     let source_descriptor: KeyDescriptor = KeyDescriptor {
         domain: Domain::APP,
@@ -1045,14 +1055,13 @@ fn test_migrate_key_app_to_selinux() -> Result<()> {
 #[test]
 fn test_migrate_key_destination_occupied() -> Result<()> {
     let mut db = new_test_db()?;
-    const SOURCE_UID: u32 = 1u32;
-    const DESTINATION_UID: u32 = 2u32;
+    const SOURCE_UID: AppUid = AppUid(1);
+    const DESTINATION_UID: AppUid = AppUid(2);
     static SOURCE_ALIAS: &str = "SOURCE_ALIAS";
     static DESTINATION_ALIAS: &str = "DESTINATION_ALIAS";
-    let key_id_guard =
-        make_test_key_entry(&mut db, Domain::APP, SOURCE_UID as i64, SOURCE_ALIAS, None)
-            .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
-    make_test_key_entry(&mut db, Domain::APP, DESTINATION_UID as i64, DESTINATION_ALIAS, None)
+    let key_id_guard = make_test_key_entry(&mut db, Domain::APP, SOURCE_UID.0, SOURCE_ALIAS, None)
+        .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
+    make_test_key_entry(&mut db, Domain::APP, DESTINATION_UID.0, DESTINATION_ALIAS, None)
         .context("test_insert_and_load_full_keyentry_from_grant_by_key_id")?;
 
     let destination_descriptor: KeyDescriptor = KeyDescriptor {
@@ -1080,15 +1089,15 @@ fn test_upgrade_0_to_1() {
     const ALIAS1: &str = "test_upgrade_0_to_1_1";
     const ALIAS2: &str = "test_upgrade_0_to_1_2";
     const ALIAS3: &str = "test_upgrade_0_to_1_3";
-    const UID: u32 = 33;
+    const UID: AppUid = AppUid(33);
     let temp_dir = Arc::new(TempDir::new("test_upgrade_0_to_1").unwrap());
     let mut db = KeystoreDB::new(temp_dir.path(), None).unwrap();
     let key_id_untouched1 =
-        make_test_key_entry(&mut db, Domain::APP, UID as i64, ALIAS1, None).unwrap().id();
+        make_test_key_entry(&mut db, Domain::APP, UID.0, ALIAS1, None).unwrap().id();
     let key_id_untouched2 =
-        make_bootlevel_key_entry(&mut db, Domain::APP, UID as i64, ALIAS2, false).unwrap().id();
+        make_bootlevel_key_entry(&mut db, Domain::APP, UID.0, ALIAS2, false).unwrap().id();
     let key_id_deleted =
-        make_bootlevel_key_entry(&mut db, Domain::APP, UID as i64, ALIAS3, true).unwrap().id();
+        make_bootlevel_key_entry(&mut db, Domain::APP, UID.0, ALIAS3, true).unwrap().id();
 
     let (_, key_entry) = db
         .load_key_entry(
@@ -1103,7 +1112,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1123,7 +1132,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1143,7 +1152,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1166,7 +1175,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1186,7 +1195,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1207,7 +1216,7 @@ fn test_upgrade_0_to_1() {
             UID,
             |k, av| {
                 assert_eq!(Domain::APP, k.domain);
-                assert_eq!(UID as i64, k.nspace);
+                assert_eq!(UID.0, k.nspace);
                 assert!(av.is_none());
                 Ok(())
             },
@@ -1239,7 +1248,7 @@ fn test_insert_and_load_full_keyentry_domain_app_concurrently() -> Result<()> {
                 },
                 KeyType::Client,
                 KeyEntryLoadBits::BOTH,
-                33,
+                AppUid(33),
                 |_k, _av| Ok(()),
             )
             .unwrap();
@@ -1267,7 +1276,7 @@ fn test_insert_and_load_full_keyentry_domain_app_concurrently() -> Result<()> {
                     },
                     KeyType::Client,
                     KeyEntryLoadBits::BOTH,
-                    33,
+                    AppUid(33),
                     |_k, _av| Ok(()),
                 )
                 .is_ok());
@@ -1466,7 +1475,7 @@ fn list() -> Result<()> {
         .map(|(domain, ns, alias)| {
             let entry =
                 make_test_key_entry(&mut db, *domain, *ns, alias, None).unwrap_or_else(|e| {
-                    panic!("Failed to insert {:?} {} {}. Error {:?}", domain, ns, alias, e)
+                    panic!("Failed to insert {domain:?} {ns} {alias}. Error {e:?}")
                 });
             (entry.id(), *ns)
         })
@@ -1500,7 +1509,7 @@ fn list() -> Result<()> {
                         &d,
                         KeyType::Client,
                         KeyEntryLoadBits::NONE,
-                        *namespace as u32,
+                        AppUid(*namespace),
                         |_, _| Ok(()),
                     )
                     .unwrap();
@@ -1531,13 +1540,8 @@ fn list() -> Result<()> {
 // Checks that the given result is an error containing the given string.
 fn check_result_is_error_containing_string<T>(result: Result<T>, target: &str) {
     let error_str =
-        format!("{:#?}", result.err().unwrap_or_else(|| panic!("Expected the error: {}", target)));
-    assert!(
-        error_str.contains(target),
-        "The string \"{}\" should contain \"{}\"",
-        error_str,
-        target
-    );
+        format!("{:#?}", result.err().unwrap_or_else(|| panic!("Expected the error: {target}")));
+    assert!(error_str.contains(target), "The string \"{error_str}\" should contain \"{target}\"");
 }
 
 #[derive(Debug, PartialEq)]
@@ -1570,7 +1574,7 @@ fn get_keyentry(db: &KeystoreDB) -> Result<Vec<KeyEntryRow>> {
 }
 
 fn make_test_params(max_usage_count: Option<i32>) -> Vec<KeyParameter> {
-    make_test_params_with_sids(max_usage_count, &[42])
+    make_test_params_with_sids(max_usage_count, &[SecureUserId(42)])
 }
 
 // Note: The parameters and SecurityLevel associations are nonsensical. This
@@ -1578,7 +1582,7 @@ fn make_test_params(max_usage_count: Option<i32>) -> Vec<KeyParameter> {
 // database.
 fn make_test_params_with_sids(
     max_usage_count: Option<i32>,
-    user_secure_ids: &[i64],
+    user_sids: &[SecureUserId],
 ) -> Vec<KeyParameter> {
     let mut params = vec![
         KeyParameter::new(KeyParameterValue::Invalid, SecurityLevel::TRUSTED_ENVIRONMENT),
@@ -1788,9 +1792,9 @@ fn make_test_params_with_sids(
         ));
     }
 
-    for sid in user_secure_ids.iter() {
+    for sid in user_sids.iter() {
         params.push(KeyParameter::new(
-            KeyParameterValue::UserSecureID(*sid),
+            KeyParameterValue::UserSecureID(sid.0),
             SecurityLevel::STRONGBOX,
         ));
     }
@@ -1804,7 +1808,14 @@ pub fn make_test_key_entry(
     alias: &str,
     max_usage_count: Option<i32>,
 ) -> Result<KeyIdGuard> {
-    make_test_key_entry_with_sids(db, domain, namespace, alias, max_usage_count, &[42])
+    make_test_key_entry_with_sids(
+        db,
+        domain,
+        namespace,
+        alias,
+        max_usage_count,
+        &[SecureUserId(42)],
+    )
 }
 
 pub fn make_test_key_entry_with_sids(
@@ -1813,7 +1824,7 @@ pub fn make_test_key_entry_with_sids(
     namespace: i64,
     alias: &str,
     max_usage_count: Option<i32>,
-    sids: &[i64],
+    sids: &[SecureUserId],
 ) -> Result<KeyIdGuard> {
     let key_id = create_key_entry(db, &domain, &namespace, KeyType::Client, &KEYSTORE_UUID)?;
     let mut blob_metadata = BlobMetaData::new();
@@ -1980,8 +1991,7 @@ fn debug_dump_keyentry_table(db: &mut KeystoreDB) -> Result<()> {
     for r in rows {
         let (id, key_type, domain, namespace, alias, state, km_uuid) = r.unwrap();
         println!(
-            "    id: {} KeyType: {:?} Domain: {} Namespace: {} Alias: {} State: {:?} KmUuid: {:?}",
-            id, key_type, domain, namespace, alias, state, km_uuid
+            "    id: {id} KeyType: {key_type:?} Domain: {domain} Namespace: {namespace} Alias: {alias} State: {state:?} KmUuid: {km_uuid:?}"
         );
     }
     Ok(())
@@ -1997,7 +2007,7 @@ fn debug_dump_grant_table(db: &mut KeystoreDB) -> Result<()> {
     println!("Grant table rows:");
     for r in rows {
         let (id, gt, ki, av) = r.unwrap();
-        println!("    id: {} grantee: {} key_id: {} access_vector: {}", id, gt, ki, av);
+        println!("    id: {id} grantee: {gt} key_id: {ki} access_vector: {av}");
     }
     Ok(())
 }
@@ -2026,16 +2036,16 @@ pub fn random() -> i64 {
 #[test]
 fn test_unbind_keys_for_user() -> Result<()> {
     let mut db = new_test_db()?;
-    db.unbind_keys_for_user(1)?;
+    db.unbind_keys_for_user(AndroidUserId(1))?;
 
     make_test_key_entry(&mut db, Domain::APP, 210000, TEST_ALIAS, None)?;
     make_test_key_entry(&mut db, Domain::APP, 110000, TEST_ALIAS, None)?;
-    db.unbind_keys_for_user(2)?;
+    db.unbind_keys_for_user(AndroidUserId(2))?;
 
     assert_eq!(1, db.list_past_alias(Domain::APP, 110000, KeyType::Client, None)?.len());
     assert_eq!(0, db.list_past_alias(Domain::APP, 210000, KeyType::Client, None)?.len());
 
-    db.unbind_keys_for_user(1)?;
+    db.unbind_keys_for_user(AndroidUserId(1))?;
     assert_eq!(0, db.list_past_alias(Domain::APP, 110000, KeyType::Client, None)?.len());
 
     Ok(())
@@ -2061,31 +2071,55 @@ fn test_unbind_keys_for_user_removes_superkeys() -> Result<()> {
     };
 
     // Install two super keys.
-    db.store_super_key(1, &key_name_nonenc, &super_key, &BlobMetaData::new(), &KeyMetaData::new())?;
-    db.store_super_key(1, &key_name_enc, &encrypted_super_key, &metadata, &KeyMetaData::new())?;
+    db.store_super_key(
+        AndroidUserId(1),
+        &key_name_nonenc,
+        &super_key,
+        &BlobMetaData::new(),
+        &KeyMetaData::new(),
+    )?;
+    db.store_super_key(
+        AndroidUserId(1),
+        &key_name_enc,
+        &encrypted_super_key,
+        &metadata,
+        &KeyMetaData::new(),
+    )?;
 
     // Check that both can be found in the database.
-    assert!(db.load_super_key(&key_name_enc, 1)?.is_some());
-    assert!(db.load_super_key(&key_name_nonenc, 1)?.is_some());
+    assert!(db.load_super_key(&key_name_enc, AndroidUserId(1))?.is_some());
+    assert!(db.load_super_key(&key_name_nonenc, AndroidUserId(1))?.is_some());
 
     // Install the same keys for a different user.
-    db.store_super_key(2, &key_name_nonenc, &super_key, &BlobMetaData::new(), &KeyMetaData::new())?;
-    db.store_super_key(2, &key_name_enc, &encrypted_super_key, &metadata, &KeyMetaData::new())?;
+    db.store_super_key(
+        AndroidUserId(2),
+        &key_name_nonenc,
+        &super_key,
+        &BlobMetaData::new(),
+        &KeyMetaData::new(),
+    )?;
+    db.store_super_key(
+        AndroidUserId(2),
+        &key_name_enc,
+        &encrypted_super_key,
+        &metadata,
+        &KeyMetaData::new(),
+    )?;
 
     // Check that the second pair of keys can be found in the database.
-    assert!(db.load_super_key(&key_name_enc, 2)?.is_some());
-    assert!(db.load_super_key(&key_name_nonenc, 2)?.is_some());
+    assert!(db.load_super_key(&key_name_enc, AndroidUserId(2))?.is_some());
+    assert!(db.load_super_key(&key_name_nonenc, AndroidUserId(2))?.is_some());
 
     // Delete all keys for user 1.
-    db.unbind_keys_for_user(1)?;
+    db.unbind_keys_for_user(AndroidUserId(1))?;
 
     // All of user 1's keys should be gone.
-    assert!(db.load_super_key(&key_name_enc, 1)?.is_none());
-    assert!(db.load_super_key(&key_name_nonenc, 1)?.is_none());
+    assert!(db.load_super_key(&key_name_enc, AndroidUserId(1))?.is_none());
+    assert!(db.load_super_key(&key_name_nonenc, AndroidUserId(1))?.is_none());
 
     // User 2's keys should not have been touched.
-    assert!(db.load_super_key(&key_name_enc, 2)?.is_some());
-    assert!(db.load_super_key(&key_name_nonenc, 2)?.is_some());
+    assert!(db.load_super_key(&key_name_enc, AndroidUserId(2))?.is_some());
+    assert!(db.load_super_key(&key_name_nonenc, AndroidUserId(2))?.is_some());
 
     Ok(())
 }
@@ -2093,34 +2127,35 @@ fn test_unbind_keys_for_user_removes_superkeys() -> Result<()> {
 #[test]
 fn test_unbind_keys_for_user_removes_received_grants() -> Result<()> {
     let mut db = new_test_db()?;
-    const USER_ID_1: u32 = 1;
-    const USER_ID_2: u32 = 2;
-    const APPLICATION_ID_1: u32 = 11;
-    const APPLICATION_ID_2: u32 = 22;
-    const UID_1_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_1;
-    const UID_2_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_2;
-    const UID_1_FOR_USER_ID_2: u32 = USER_ID_2 * AID_USER_OFFSET + APPLICATION_ID_1;
+    let user_1 = AndroidUserId(1);
+    let user_2 = AndroidUserId(2);
+    let application_id_1 = 11;
+    let application_id_2 = 22;
+    let uid_1_for_user_1 = AppUid(user_1.0 as i64 * AID_USER_OFFSET as i64 + application_id_1);
+    let uid_2_for_user_1 = AppUid(user_1.0 as i64 * AID_USER_OFFSET as i64 + application_id_2);
+    let uid_1_for_user_2 = AppUid(user_2.0 as i64 * AID_USER_OFFSET as i64 + application_id_1);
 
     // Pretend two application IDs for user ID 1 were granted access to 1 key each and one
     // application ID for user ID 2 was granted access to 1 key.
     db.conn.execute(
         &format!(
             "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
-                    VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222),
-                           (2, {UID_1_FOR_USER_ID_2}, 333, 444),
-                           (3, {UID_2_FOR_USER_ID_1}, 555, 666);"
+                    VALUES (1, {}, 111, 222),
+                           (2, {}, 333, 444),
+                           (3, {}, 555, 666);",
+            uid_1_for_user_1.0, uid_1_for_user_2.0, uid_2_for_user_1.0,
         ),
         [],
     )?;
-    db.unbind_keys_for_user(USER_ID_1)?;
+    db.unbind_keys_for_user(user_1)?;
 
     let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
-    let mut rows = stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let mut rows = stmt.query_map::<(i64, i64), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
     // The rows for the user ID 1 grantees (UID_1_FOR_USER_ID_1 and UID_2_FOR_USER_ID_1) should be
     // deleted and the row for the user ID 2 grantee (UID_1_FOR_USER_ID_2) should be untouched.
     let r = rows.next().unwrap().unwrap();
-    assert_eq!(r, (2, UID_1_FOR_USER_ID_2));
+    assert_eq!(r, (2, uid_1_for_user_2.0));
     assert!(rows.next().is_none());
 
     Ok(())
@@ -2128,11 +2163,11 @@ fn test_unbind_keys_for_user_removes_received_grants() -> Result<()> {
 
 #[test]
 fn test_unbind_keys_for_namespace_removes_received_grants() -> Result<()> {
-    const USER_ID_1: u32 = 1;
-    const APPLICATION_ID_1: u32 = 11;
-    const APPLICATION_ID_2: u32 = 22;
-    const UID_1_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_1;
-    const UID_2_FOR_USER_ID_1: u32 = USER_ID_1 * AID_USER_OFFSET + APPLICATION_ID_2;
+    let user_1 = AndroidUserId(1);
+    let application_id_1 = 11;
+    let application_id_2 = 22;
+    let uid_1_for_user_1 = AppUid(user_1.0 as i64 * AID_USER_OFFSET as i64 + application_id_1);
+    let uid_2_for_user_1 = AppUid(user_1.0 as i64 * AID_USER_OFFSET as i64 + application_id_2);
 
     // Check that grants are removed for Domain::APP.
     {
@@ -2142,21 +2177,22 @@ fn test_unbind_keys_for_namespace_removes_received_grants() -> Result<()> {
         db.conn.execute(
             &format!(
                 "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
-                VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222), (2, {UID_2_FOR_USER_ID_1}, 333, 444);"
+                VALUES (1, {}, 111, 222), (2, {}, 333, 444);",
+                uid_1_for_user_1.0, uid_2_for_user_1.0,
             ),
             [],
         )?;
         // Keystore uses the UID as the namespace for Domain::APP keys.
-        db.unbind_keys_for_namespace(Domain::APP, UID_1_FOR_USER_ID_1.into())?;
+        db.unbind_keys_for_namespace(Domain::APP, uid_1_for_user_1.0)?;
 
         let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
         let mut rows =
-            stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            stmt.query_map::<(i64, i64), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
-        // The row for the grant to the namespace that was cleared (UID_1_FOR_USER_ID_1) should be
+        // The row for the grant to the namespace that was cleared (`uid_1_for_user_1`) should be
         // deleted. The other row should be untouched.
         let r = rows.next().unwrap().unwrap();
-        assert_eq!(r, (2, UID_2_FOR_USER_ID_1));
+        assert_eq!(r, (2, uid_2_for_user_1.0));
         assert!(rows.next().is_none());
     }
 
@@ -2168,24 +2204,25 @@ fn test_unbind_keys_for_namespace_removes_received_grants() -> Result<()> {
         db.conn.execute(
             &format!(
                 "INSERT INTO persistent.grant (id, grantee, keyentryid, access_vector)
-                VALUES (1, {UID_1_FOR_USER_ID_1}, 111, 222), (2, {UID_2_FOR_USER_ID_1}, 333, 444);"
+                VALUES (1, {}, 111, 222), (2, {}, 333, 444);",
+                uid_1_for_user_1.0, uid_2_for_user_1.0,
             ),
             [],
         )?;
         // Keystore uses the UID as the namespace for Domain::APP keys. Here we're passing in
         // Domain::SELINUX, but still pass the UID as the "namespace" argument to make sure the
         // code's logic is correct.
-        db.unbind_keys_for_namespace(Domain::SELINUX, UID_1_FOR_USER_ID_1.into())?;
+        db.unbind_keys_for_namespace(Domain::SELINUX, uid_1_for_user_1.0)?;
 
         let mut stmt = db.conn.prepare("SELECT id, grantee FROM persistent.grant")?;
         let mut rows =
-            stmt.query_map::<(i64, u32), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            stmt.query_map::<(i64, i64), _, _>([], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         // Both rows should still be present.
         let r = rows.next().unwrap().unwrap();
-        assert_eq!(r, (1, UID_1_FOR_USER_ID_1));
+        assert_eq!(r, (1, uid_1_for_user_1.0));
         let r = rows.next().unwrap().unwrap();
-        assert_eq!(r, (2, UID_2_FOR_USER_ID_1));
+        assert_eq!(r, (2, uid_2_for_user_1.0));
         assert!(rows.next().is_none());
     }
 
@@ -2200,11 +2237,11 @@ fn app_key_exists(db: &mut KeystoreDB, nspace: i64, alias: &str) -> Result<bool>
 #[test]
 fn test_unbind_auth_bound_keys_for_user() -> Result<()> {
     let mut db = new_test_db()?;
-    let user_id = 1;
-    let nspace: i64 = (user_id * AID_USER_OFFSET).into();
+    let user = AndroidUserId(1);
+    let nspace: i64 = user.0 as i64 * AID_USER_OFFSET as i64;
     let other_user_id = 2;
     let other_user_nspace: i64 = (other_user_id * AID_USER_OFFSET).into();
-    let super_key_type = &USER_AFTER_FIRST_UNLOCK_SUPER_KEY;
+    let super_key_type = &CREDENTIAL_ENCRYPTED_SUPER_KEY;
 
     // Create a superencryption key.
     let super_key = keystore2_crypto::generate_aes256_key()?;
@@ -2212,13 +2249,13 @@ fn test_unbind_auth_bound_keys_for_user() -> Result<()> {
     let (encrypted_super_key, blob_metadata) =
         SuperKeyManager::encrypt_with_password(&super_key, &pw)?;
     db.store_super_key(
-        user_id,
+        user,
         super_key_type,
         &encrypted_super_key,
         &blob_metadata,
         &KeyMetaData::new(),
     )?;
-    let super_key_id = db.load_super_key(super_key_type, user_id)?.unwrap().0 .0;
+    let super_key_id = db.load_super_key(super_key_type, user)?.unwrap().0 .0;
 
     // Store 4 superencrypted app keys, one for each possible combination of
     // (authentication required, unlocked device required).
@@ -2234,13 +2271,13 @@ fn test_unbind_auth_bound_keys_for_user() -> Result<()> {
     // Also store a key for a different user that requires authentication.
     make_superencrypted_key_entry(&mut db, other_user_nspace, "auth_ud", true, true, super_key_id)?;
 
-    db.unbind_auth_bound_keys_for_user(user_id)?;
+    db.unbind_auth_bound_keys_for_user(user)?;
 
     // Verify that only the user's app keys that require authentication were
     // deleted. Keys that require an unlocked device but not authentication
     // should *not* have been deleted, nor should the super key have been
     // deleted, nor should other users' keys have been deleted.
-    assert!(db.load_super_key(super_key_type, user_id)?.is_some());
+    assert!(db.load_super_key(super_key_type, user)?.is_some());
     assert!(app_key_exists(&mut db, nspace, "noauth_noud")?);
     assert!(app_key_exists(&mut db, nspace, "noauth_ud")?);
     assert!(!app_key_exists(&mut db, nspace, "auth_noud")?);
@@ -2260,24 +2297,20 @@ fn test_store_super_key() -> Result<()> {
 
     let (encrypted_super_key, metadata) = SuperKeyManager::encrypt_with_password(&super_key, &pw)?;
     db.store_super_key(
-        1,
-        &USER_AFTER_FIRST_UNLOCK_SUPER_KEY,
+        AndroidUserId(1),
+        &CREDENTIAL_ENCRYPTED_SUPER_KEY,
         &encrypted_super_key,
         &metadata,
         &KeyMetaData::new(),
     )?;
 
     // Check if super key exists.
-    assert!(db.key_exists(
-        Domain::APP,
-        1,
-        USER_AFTER_FIRST_UNLOCK_SUPER_KEY.alias,
-        KeyType::Super
-    )?);
+    assert!(db.key_exists(Domain::APP, 1, CREDENTIAL_ENCRYPTED_SUPER_KEY.alias, KeyType::Super)?);
 
-    let (_, key_entry) = db.load_super_key(&USER_AFTER_FIRST_UNLOCK_SUPER_KEY, 1)?.unwrap();
+    let (_, key_entry) =
+        db.load_super_key(&CREDENTIAL_ENCRYPTED_SUPER_KEY, AndroidUserId(1))?.unwrap();
     let loaded_super_key = SuperKeyManager::extract_super_key_from_key_entry(
-        USER_AFTER_FIRST_UNLOCK_SUPER_KEY.algorithm,
+        CREDENTIAL_ENCRYPTED_SUPER_KEY.algorithm,
         key_entry,
         &pw,
         None,
@@ -2435,7 +2468,7 @@ fn test_verify_key_table_size_reporting() -> Result<()> {
         sum += stat.size;
     }
     let total = db.get_storage_stat(MetricsStorage::DATABASE)?.size;
-    assert!(sum <= total, "Expected sum <= total. sum: {}, total: {}", sum, total);
+    assert!(sum <= total, "Expected sum <= total. sum: {sum}, total: {total}");
 
     Ok(())
 }
@@ -2458,9 +2491,9 @@ fn test_verify_auth_table_size_reporting() -> Result<()> {
 
 #[test]
 fn test_verify_grant_table_size_reporting() -> Result<()> {
-    const OWNER: i64 = 1;
+    const OWNER: AppUid = AppUid(1);
     let mut db = new_test_db()?;
-    make_test_key_entry(&mut db, Domain::APP, OWNER, TEST_ALIAS, None)?;
+    make_test_key_entry(&mut db, Domain::APP, OWNER.0, TEST_ALIAS, None)?;
 
     let mut working_stats = get_storage_stats_map(&mut db);
     db.grant(
@@ -2470,8 +2503,8 @@ fn test_verify_grant_table_size_reporting() -> Result<()> {
             alias: Some(TEST_ALIAS.to_string()),
             blob: None,
         },
-        OWNER as u32,
-        123,
+        OWNER,
+        AppUid(123),
         key_perm_set![KeyPerm::Use],
         |_, _| Ok(()),
     )?;
@@ -2517,6 +2550,30 @@ fn find_auth_token_entry_returns_latest() -> Result<()> {
     Ok(())
 }
 
+/// Returns `Vec` of (key id, blob id, blob state)
+fn describe_blobs(db: &mut KeystoreDB, sc_type: SubComponentType) -> Vec<(i64, i64, BlobState)> {
+    db.with_transaction(TransactionBehavior::Deferred, |tx| {
+        let mut stmt = tx
+            .prepare(
+                "SELECT keyentryid, state, id FROM blobentry
+                            WHERE subcomponent_type = ? ORDER BY keyentryid, id;",
+            )
+            .unwrap();
+        let mut rows = stmt.query(params![sc_type]).unwrap();
+        let mut blobinfo = vec![];
+        db_utils::with_rows_extract_all(&mut rows, |row| {
+            let key_id: i64 = row.get(0).unwrap();
+            let state: BlobState = row.get(1).unwrap();
+            let blob_id: i64 = row.get(2).unwrap();
+            blobinfo.push((key_id, blob_id, state));
+            Ok(())
+        })
+        .unwrap();
+        Ok(blobinfo).no_gc()
+    })
+    .unwrap()
+}
+
 fn blob_count(db: &mut KeystoreDB, sc_type: SubComponentType) -> usize {
     db.with_transaction(TransactionBehavior::Deferred, |tx| {
         tx.query_row(
@@ -2547,79 +2604,182 @@ fn blob_count_in_state(db: &mut KeystoreDB, sc_type: SubComponentType, state: Bl
 
 #[test]
 fn test_blobentry_gc() -> Result<()> {
+    use BlobState::{Current, Orphaned, Superseded};
+
+    // Make parts of the test conditional on whether the fix for lost keyblobs from key rebind is
+    // present.
+    let fixed = keystore2_flags::remove_rebound_keyblobs_fix();
+
+    init_test_logging();
     let mut db = new_test_db()?;
-    let _key_id1 = make_test_key_entry(&mut db, Domain::APP, 1, "key1", None)?.0;
-    let key_guard2 = make_test_key_entry(&mut db, Domain::APP, 2, "key2", None)?;
-    let key_guard3 = make_test_key_entry(&mut db, Domain::APP, 3, "key3", None)?;
+
+    // Create 5 keys, and arrange things so the that the key IDs, aliases and namespace values
+    // (owning uids) all run 0..=4.  The corresponding 3 initial blobs for key N will have ids of:
+    // - KEY_BLOB:   1 + 3xN
+    // - CERT:       1 + 3xN + 1
+    // - CERT_CHAIN: 1 + 3xN + 2
+    let _key_id0 = make_test_key_entry(&mut db, Domain::APP, 0, "key0", None)?.0;
+    let key_guard1 = make_test_key_entry(&mut db, Domain::APP, 1, "key1", None)?;
+    let _key_id2 = make_test_key_entry(&mut db, Domain::APP, 2, "key2", None)?.0;
+    let key_id3 = make_test_key_entry(&mut db, Domain::APP, 3, "key3", None)?.0;
     let key_id4 = make_test_key_entry(&mut db, Domain::APP, 4, "key4", None)?.0;
-    let key_id5 = make_test_key_entry(&mut db, Domain::APP, 5, "key5", None)?.0;
+    let orig_blob_id = |keyid: i64| 1 + 3 * keyid;
 
-    assert_eq!(5, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(5, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, orig_blob_id(1), Current),
+            (2, orig_blob_id(2), Current),
+            (3, orig_blob_id(3), Current),
+            (4, orig_blob_id(4), Current)
+        ],
+        "After creating 5 keys"
+    );
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
-    // Replace the keyblobs for keys 2 and 3.  The previous blobs will still exist.
-    db.set_blob(&key_guard2, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
-    db.set_blob(&key_guard3, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
+    // Replace the keyblob for key ID 1 by directly updating the blob entry, analogous to
+    // the key upgrade flow.  The previous blob will still exist, but be superseded.
+    log::info!("Replace key1's blob");
+    db.set_blob(&key_guard1, SubComponentType::KEY_BLOB, Some(&[1, 2, 3]), None)?;
 
-    assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(5, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, orig_blob_id(1), Superseded),
+            (1, 16, Current),
+            (2, orig_blob_id(2), Current),
+            (3, orig_blob_id(3), Current),
+            (4, orig_blob_id(4), Current)
+        ],
+        "After replacing key1's blob"
+    );
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
-    // Delete keys 4 and 5.  The keyblobs aren't removed yet.
+    // Replace the keyblob for "key2" by creating a new key (with a new ID) under the same alias,
+    // and note that the new "key2" has no CERT[_CHAIN]. The old key still exists.
+    log::info!("Rebind key2");
+    db.store_new_key(
+        &KeyDescriptor {
+            domain: super::Domain::APP,
+            nspace: 2,
+            alias: Some("key2".to_string()),
+            blob: None,
+        },
+        KeyType::Client,
+        &make_test_params_with_sids(None, &[]),
+        &BlobInfo::new(&[1, 2, 3], &BlobMetaData::new()),
+        &CertificateInfo::new(None, None),
+        &KeyMetaData::new(),
+        &KEYSTORE_UUID,
+    )?;
+
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, orig_blob_id(1), Superseded),
+            (1, 16, Current),
+            (2, orig_blob_id(2), Current), // original keyID for 'key2' alias
+            (3, orig_blob_id(3), Current),
+            (4, orig_blob_id(4), Current),
+            (5, 17, Current), // new keyID for existing 'key2' alias
+        ],
+        "After rebinding 'key2'"
+    );
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
+    assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
+
+    // Delete keys 3 and 4.  The keyblobs aren't removed yet, but are marked as orphaned.
+    log::info!("Delete key3 and key4");
     db.with_transaction(Immediate("TX_delete_test_keys"), |tx| {
-        KeystoreDB::mark_unreferenced(tx, key_id4)?;
-        KeystoreDB::mark_unreferenced(tx, key_id5)?;
+        KeystoreDB::remove_key_rows(tx, key_id3)?;
+        KeystoreDB::remove_key_rows(tx, key_id4)?;
         Ok(()).no_gc()
     })
     .unwrap();
 
-    assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, orig_blob_id(1), Superseded),
+            (1, 16, Current),
+            (2, orig_blob_id(2), Current),
+            (3, orig_blob_id(3), Orphaned),
+            (4, orig_blob_id(4), Orphaned),
+            (5, 17, Current),
+        ],
+        "After deleting key3 and key4"
+    );
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
-    // First garbage collection should return all 4 blobentry rows that are no longer current for
-    // their key.
+    // First garbage collection should mark the original keyblob for key2 as orphaned, then return
+    // all 4 blobentry rows that are no longer current for their key.
+    log::info!("Perform GC([])");
     let superseded = db.handle_next_superseded_blobs(&[], 20).unwrap();
     let superseded_ids: Vec<i64> = superseded.iter().map(|v| v.blob_id).collect();
-    assert_eq!(4, superseded.len());
-    assert_eq!(7, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(2, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
+    let (want_superseded, want_key2_state) = if fixed {
+        (vec![orig_blob_id(1), orig_blob_id(2), orig_blob_id(3), orig_blob_id(4)], Orphaned)
+    } else {
+        // Prior behaviour leaves the rebound keyblob present and Current.
+        (vec![orig_blob_id(1), orig_blob_id(3), orig_blob_id(4)], Current)
+    };
+
+    assert_eq!(superseded_ids, want_superseded,);
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, orig_blob_id(1), Superseded),
+            (1, 16, Current),
+            (2, orig_blob_id(2), want_key2_state),
+            (3, orig_blob_id(3), Orphaned),
+            (4, orig_blob_id(4), Orphaned),
+            (5, 17, Current),
+        ],
+        "After GC(&[])"
+    );
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT));
     assert_eq!(5, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
     // Feed the superseded blob IDs back in, to trigger removal of the old KEY_BLOB entries.  As no
     // new superseded KEY_BLOBs are found, the unreferenced CERT/CERT_CHAIN blobs are removed.
+    log::info!("Perform GC([keyblobs])");
     let superseded = db.handle_next_superseded_blobs(&superseded_ids, 20).unwrap();
     let superseded_ids: Vec<i64> = superseded.iter().map(|v| v.blob_id).collect();
     assert_eq!(0, superseded.len());
-    assert_eq!(3, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
-    assert_eq!(3, blob_count(&mut db, SubComponentType::CERT));
-    assert_eq!(3, blob_count(&mut db, SubComponentType::CERT_CHAIN));
+    let final_blobs = if fixed {
+        vec![(0, orig_blob_id(0), Current), (1, 16, Current), (5, 17, Current)]
+    } else {
+        vec![
+            (0, orig_blob_id(0), Current),
+            (1, 16, Current),
+            (2, orig_blob_id(2), Current), // orphaned/leaked
+            (5, 17, Current),
+        ]
+    };
+
+    assert_eq!(
+        describe_blobs(&mut db, SubComponentType::KEY_BLOB),
+        final_blobs,
+        "After GC({superseded_ids:?})"
+    );
+    // The CERT[_CHAIN] blobs for keys 2,3,4 are now gone.
+    let final_cert_count = if fixed { 2 } else { 3 };
+    assert_eq!(final_cert_count, blob_count(&mut db, SubComponentType::CERT));
+    assert_eq!(final_cert_count, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
     // Nothing left to garbage collect.
     let superseded = db.handle_next_superseded_blobs(&superseded_ids, 20).unwrap();
     assert_eq!(0, superseded.len());
-    assert_eq!(3, blob_count(&mut db, SubComponentType::KEY_BLOB));
-    assert_eq!(3, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Superseded));
-    assert_eq!(0, blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned));
-    assert_eq!(3, blob_count(&mut db, SubComponentType::CERT));
-    assert_eq!(3, blob_count(&mut db, SubComponentType::CERT_CHAIN));
+    assert_eq!(describe_blobs(&mut db, SubComponentType::KEY_BLOB), final_blobs, "After GC(&[])");
+    assert_eq!(final_cert_count, blob_count(&mut db, SubComponentType::CERT));
+    assert_eq!(final_cert_count, blob_count(&mut db, SubComponentType::CERT_CHAIN));
 
     Ok(())
 }
@@ -2639,8 +2799,8 @@ fn test_upgrade_1_to_2() -> Result<()> {
 
     // Delete keys 4 and 5.  The keyblobs aren't removed yet.
     db.with_transaction(Immediate("TX_delete_test_keys"), |tx| {
-        KeystoreDB::mark_unreferenced(tx, key_id4)?;
-        KeystoreDB::mark_unreferenced(tx, key_id5)?;
+        KeystoreDB::remove_key_rows(tx, key_id4)?;
+        KeystoreDB::remove_key_rows(tx, key_id5)?;
         Ok(()).no_gc()
     })
     .unwrap();
@@ -2691,19 +2851,19 @@ fn test_load_key_descriptor() -> Result<()> {
 
 #[test]
 fn test_get_list_app_uids_for_sid() -> Result<()> {
-    let uid: i32 = 1;
-    let uid_offset: i64 = (uid as i64) * (AID_USER_OFFSET as i64);
-    let first_sid = 667;
-    let second_sid = 669;
-    let first_app_id: i64 = 123 + uid_offset;
-    let second_app_id: i64 = 456 + uid_offset;
-    let third_app_id: i64 = 789 + uid_offset;
-    let unrelated_app_id: i64 = 1011 + uid_offset;
+    let user = AndroidUserId(1);
+    let uid_offset: i64 = user.0 as i64 * AID_USER_OFFSET as i64;
+    let first_sid = SecureUserId(667);
+    let second_sid = SecureUserId(669);
+    let first_app_id = AppUid(123 + uid_offset);
+    let second_app_id = AppUid(456 + uid_offset);
+    let third_app_id = AppUid(789 + uid_offset);
+    let unrelated_app_id = AppUid(1011 + uid_offset);
     let mut db = new_test_db()?;
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        first_app_id,
+        first_app_id.0,
         TEST_ALIAS,
         None,
         &[first_sid],
@@ -2712,7 +2872,7 @@ fn test_get_list_app_uids_for_sid() -> Result<()> {
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        second_app_id,
+        second_app_id.0,
         "alias2",
         None,
         &[first_sid],
@@ -2721,7 +2881,7 @@ fn test_get_list_app_uids_for_sid() -> Result<()> {
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        second_app_id,
+        second_app_id.0,
         TEST_ALIAS,
         None,
         &[second_sid],
@@ -2730,19 +2890,19 @@ fn test_get_list_app_uids_for_sid() -> Result<()> {
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        third_app_id,
+        third_app_id.0,
         "alias3",
         None,
         &[second_sid],
     )
     .context("test_get_list_app_uids_for_sid")?;
-    make_test_key_entry_with_sids(&mut db, Domain::APP, unrelated_app_id, TEST_ALIAS, None, &[])
+    make_test_key_entry_with_sids(&mut db, Domain::APP, unrelated_app_id.0, TEST_ALIAS, None, &[])
         .context("test_get_list_app_uids_for_sid")?;
 
-    let mut first_sid_apps = db.get_app_uids_affected_by_sid(uid, first_sid)?;
+    let mut first_sid_apps = db.get_app_uids_affected_by_sid(user, first_sid)?;
     first_sid_apps.sort();
     assert_eq!(first_sid_apps, vec![first_app_id, second_app_id]);
-    let mut second_sid_apps = db.get_app_uids_affected_by_sid(uid, second_sid)?;
+    let mut second_sid_apps = db.get_app_uids_affected_by_sid(user, second_sid)?;
     second_sid_apps.sort();
     assert_eq!(second_sid_apps, vec![second_app_id, third_app_id]);
     Ok(())
@@ -2750,18 +2910,18 @@ fn test_get_list_app_uids_for_sid() -> Result<()> {
 
 #[test]
 fn test_get_list_app_uids_with_multiple_sids() -> Result<()> {
-    let uid: i32 = 1;
-    let uid_offset: i64 = (uid as i64) * (AID_USER_OFFSET as i64);
-    let first_sid = 667;
-    let second_sid = 669;
-    let third_sid = 772;
-    let first_app_id: i64 = 123 + uid_offset;
-    let second_app_id: i64 = 456 + uid_offset;
+    let user = AndroidUserId(1);
+    let uid_offset: i64 = user.0 as i64 * AID_USER_OFFSET as i64;
+    let first_sid = SecureUserId(667);
+    let second_sid = SecureUserId(669);
+    let third_sid = SecureUserId(772);
+    let first_app_id = AppUid(123 + uid_offset);
+    let second_app_id = AppUid(456 + uid_offset);
     let mut db = new_test_db()?;
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        first_app_id,
+        first_app_id.0,
         TEST_ALIAS,
         None,
         &[first_sid, second_sid],
@@ -2770,21 +2930,21 @@ fn test_get_list_app_uids_with_multiple_sids() -> Result<()> {
     make_test_key_entry_with_sids(
         &mut db,
         Domain::APP,
-        second_app_id,
+        second_app_id.0,
         "alias2",
         None,
         &[second_sid, third_sid],
     )
     .context("test_get_list_app_uids_for_sid")?;
 
-    let first_sid_apps = db.get_app_uids_affected_by_sid(uid, first_sid)?;
+    let first_sid_apps = db.get_app_uids_affected_by_sid(user, first_sid)?;
     assert_eq!(first_sid_apps, vec![first_app_id]);
 
-    let mut second_sid_apps = db.get_app_uids_affected_by_sid(uid, second_sid)?;
+    let mut second_sid_apps = db.get_app_uids_affected_by_sid(user, second_sid)?;
     second_sid_apps.sort();
     assert_eq!(second_sid_apps, vec![first_app_id, second_app_id]);
 
-    let third_sid_apps = db.get_app_uids_affected_by_sid(uid, third_sid)?;
+    let third_sid_apps = db.get_app_uids_affected_by_sid(user, third_sid)?;
     assert_eq!(third_sid_apps, vec![second_app_id]);
     Ok(())
 }
@@ -2833,7 +2993,7 @@ fn db_populate_keys(db: &mut KeystoreDB, next_keyid: usize, key_count: usize) {
 /// database population.
 fn run_with_many_keys<F, T>(max_count: usize, test_fn: F) -> Result<()>
 where
-    F: Fn(&mut KeystoreDB) -> T,
+    F: Fn(&mut KeystoreDB, usize) -> T,
 {
     prep_and_run_with_many_keys(max_count, |_db| (), test_fn)
 }
@@ -2842,14 +3002,10 @@ where
 /// database population.
 fn prep_and_run_with_many_keys<F, T, P>(max_count: usize, prep_fn: P, test_fn: F) -> Result<()>
 where
-    F: Fn(&mut KeystoreDB) -> T,
+    F: Fn(&mut KeystoreDB, usize) -> T,
     P: Fn(&mut KeystoreDB),
 {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_tag("keystore2_test")
-            .with_max_level(log::LevelFilter::Debug),
-    );
+    init_test_logging();
     // Put the test database on disk for a more realistic result.
     let db_root = tempfile::Builder::new().prefix("ks2db-test-").tempdir().unwrap();
     let mut db_path = db_root.path().to_owned();
@@ -2868,7 +3024,7 @@ where
 
         // Time execution of the test function.
         let start = std::time::Instant::now();
-        let _result = test_fn(&mut db);
+        let _result = test_fn(&mut db, key_count);
         println!("{key_count}, {}", start.elapsed().as_secs_f64());
 
         next_keyid = key_count;
@@ -2879,11 +3035,15 @@ where
 }
 
 fn db_key_count(db: &mut KeystoreDB) -> usize {
+    db_key_count_in_state(db, KeyLifeCycle::Live)
+}
+
+fn db_key_count_in_state(db: &mut KeystoreDB, state: KeyLifeCycle) -> usize {
     db.with_transaction(TransactionBehavior::Deferred, |tx| {
         tx.query_row(
             "SELECT COUNT(*) FROM persistent.keyentry
-                         WHERE domain = ? AND state = ? AND key_type = ?;",
-            params![Domain::APP.0 as u32, KeyLifeCycle::Live, KeyType::Client],
+                         WHERE state = ? AND key_type = ?;",
+            params![state, KeyType::Client],
             |row| row.get::<usize, usize>(0),
         )
         .context(ks_err!("Failed to count number of keys."))
@@ -2893,14 +3053,32 @@ fn db_key_count(db: &mut KeystoreDB) -> usize {
 }
 
 #[test]
+fn test_per_uid_counts() -> Result<()> {
+    run_with_many_keys(1_000_000, |db, key_count| {
+        // There is one uid with more than zero keys.
+        assert_eq!(db.per_uid_counts(0, 0).unwrap(), vec![]);
+        assert_eq!(db.per_uid_counts(1, 0).unwrap(), vec![(10001, key_count)]);
+        assert_eq!(db.per_uid_counts(10, 0).unwrap(), vec![(10001, key_count)]);
+
+        // There are no uids with > `key_count` keys.
+        assert_eq!(db.per_uid_counts(1, key_count).unwrap(), vec![]);
+        assert_eq!(db.per_uid_counts(10, key_count).unwrap(), vec![]);
+
+        // There is one uid with >= `key_count` keys.
+        assert_eq!(db.per_uid_counts(1, key_count - 1).unwrap(), vec![(10001, key_count)]);
+        assert_eq!(db.per_uid_counts(10, key_count - 1).unwrap(), vec![(10001, key_count)]);
+    })
+}
+
+#[test]
 fn test_handle_superseded_with_many_keys() -> Result<()> {
-    run_with_many_keys(1_000_000, |db| db.handle_next_superseded_blobs(&[], 20))
+    run_with_many_keys(1_000_000, |db, _| db.handle_next_superseded_blobs(&[], 20))
 }
 
 #[test]
 fn test_get_storage_stats_with_many_keys() -> Result<()> {
     use android_security_metrics::aidl::android::security::metrics::Storage::Storage as MetricsStorage;
-    run_with_many_keys(1_000_000, |db| {
+    run_with_many_keys(1_000_000, |db, _| {
         db.get_storage_stat(MetricsStorage::DATABASE).unwrap();
         db.get_storage_stat(MetricsStorage::KEY_ENTRY).unwrap();
         db.get_storage_stat(MetricsStorage::KEY_ENTRY_ID_INDEX).unwrap();
@@ -2920,7 +3098,7 @@ fn test_get_storage_stats_with_many_keys() -> Result<()> {
 
 #[test]
 fn test_list_keys_with_many_keys() -> Result<()> {
-    run_with_many_keys(1_000_000, |db: &mut KeystoreDB| -> Result<()> {
+    run_with_many_keys(1_000_000, |db: &mut KeystoreDB, _| -> Result<()> {
         // Behave equivalently to how clients list aliases.
         let domain = Domain::APP;
         let namespace = 10001;
@@ -2966,7 +3144,7 @@ fn test_upgrade_1_to_2_with_many_keys() -> Result<()> {
             })
             .unwrap();
         },
-        |db: &mut KeystoreDB| -> Result<()> {
+        |db: &mut KeystoreDB, _| -> Result<()> {
             // Run the upgrade process.
             db.with_transaction(Immediate("TX_upgrade_1_to_2"), |tx| {
                 KeystoreDB::from_1_to_2(tx).no_gc()
@@ -2974,4 +3152,83 @@ fn test_upgrade_1_to_2_with_many_keys() -> Result<()> {
             Ok(())
         },
     )
+}
+#[test]
+fn test_many_rebind_same_alias() -> Result<()> {
+    init_test_logging();
+    let fixed = keystore2_flags::remove_rebound_keyblobs_fix();
+
+    // Put the test database on disk for a more realistic result.
+    let db_root = tempfile::Builder::new().prefix("ks2db-test-").tempdir().unwrap();
+    let mut db_path = db_root.path().to_owned();
+    db_path.push("ks2-test.sqlite");
+    let mut db = new_test_db_at(&db_path.to_string_lossy())?;
+
+    let descriptor = KeyDescriptor {
+        domain: super::Domain::APP,
+        nspace: 0, // uid
+        alias: Some("reused-alias".to_string()),
+        blob: None,
+    };
+    let params = make_test_params(None);
+    let blob_metadata = BlobMetaData::new();
+    let blob_info = BlobInfo::new(TEST_KEY_BLOB, &blob_metadata);
+    let cert_info = CertificateInfo::new(None, None);
+    let key_metadata = KeyMetaData::new();
+
+    let key_count = 500;
+    for _ in 0..key_count {
+        let _key_id = db.store_new_key(
+            &descriptor,
+            KeyType::Client,
+            &params,
+            &blob_info,
+            &cert_info,
+            &key_metadata,
+            &KEYSTORE_UUID,
+        )?;
+    }
+
+    // Nothing removed yet, but only one live key.
+    assert_eq!(db_key_count_in_state(&mut db, KeyLifeCycle::Live), 1);
+    assert_eq!(db_key_count_in_state(&mut db, KeyLifeCycle::Unreferenced), key_count - 1);
+    assert_eq!(
+        blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current),
+        key_count
+    );
+    let mut orphan_blob_count = key_count - 1;
+
+    let mut superseded_ids = vec![];
+    while orphan_blob_count > 0 || !superseded_ids.is_empty() {
+        // Calling GC should...
+        println!("pass {} blob ids to handle_next_superseded_blobs", superseded_ids.len());
+        let superseded_blobs = db.handle_next_superseded_blobs(&superseded_ids, 20)?;
+
+        // ... remove all unreferenced `keyentry` rows
+        assert_eq!(db_key_count_in_state(&mut db, KeyLifeCycle::Live), 1);
+        assert_eq!(db_key_count_in_state(&mut db, KeyLifeCycle::Unreferenced), 0);
+
+        if !fixed {
+            // Prior behaviour incorrectly leaves orphaned keyblobs alone.
+            assert_eq!(superseded_blobs.len(), 0);
+            assert_eq!(
+                blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Current),
+                key_count
+            );
+            return Ok(());
+        }
+
+        // ... reduce the number of blobs in the table by the number of IDs passed in
+        orphan_blob_count -= superseded_ids.len();
+        assert_eq!(
+            blob_count_in_state(&mut db, SubComponentType::KEY_BLOB, BlobState::Orphaned),
+            orphan_blob_count
+        );
+        println!("now left with {orphan_blob_count} orphan blobs");
+
+        assert_eq!(superseded_blobs.len(), std::cmp::min(20, orphan_blob_count));
+        superseded_ids = superseded_blobs.into_iter().map(|sb| sb.blob_id).collect();
+    }
+
+    Ok(())
 }

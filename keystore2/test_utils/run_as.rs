@@ -46,7 +46,7 @@ pub struct Error(pub String);
 impl From<anyhow::Error> for Error {
     fn from(err: anyhow::Error) -> Self {
         // Use the debug format of [`anyhow::Error`] to include backtrace.
-        Self(format!("{:?}", err))
+        Self(format!("{err:?}"))
     }
 }
 impl From<String> for Error {
@@ -180,10 +180,7 @@ impl<T: Serialize + DeserializeOwned> ChannelWriter<T> {
         match self.0.write(&size).expect("In ChannelWriter::send: Failed to write serialized size.")
         {
             w if w != std::mem::size_of::<usize>() => {
-                panic!(
-                    "In ChannelWriter::send: Failed to write serialized size. (written: {}).",
-                    w
-                );
+                panic!("In ChannelWriter::send: Failed to write serialized size. (written: {w}).");
             }
             _ => {}
         };
@@ -193,10 +190,7 @@ impl<T: Serialize + DeserializeOwned> ChannelWriter<T> {
             .expect("In ChannelWriter::send: Failed to write serialized data.")
         {
             w if w != serialized.len() => {
-                panic!(
-                    "In ChannelWriter::send: Failed to write serialized data. (written: {}).",
-                    w
-                );
+                panic!("In ChannelWriter::send: Failed to write serialized data. (written: {w}).");
             }
             _ => {}
         };
@@ -224,8 +218,7 @@ impl<T: Serialize + DeserializeOwned> ChannelReader<T> {
         match self.0.read(&mut size_buffer).expect("In ChannelReader::recv: Failed to read size.") {
             r if r != size_buffer.len() => {
                 return Err(format!(
-                    "In ChannelReader::recv: Failed to read size. Insufficient data: {}",
-                    r
+                    "In ChannelReader::recv: Failed to read size. Insufficient data: {r}"
                 )
                 .into());
             }
@@ -236,8 +229,7 @@ impl<T: Serialize + DeserializeOwned> ChannelReader<T> {
         match self.0.read(&mut data_buffer) {
             Ok(r) if r != data_buffer.len() => {
                 return Err(format!(
-                    "In ChannelReader::recv: Failed to read serialized data. Insufficient data: {}",
-                    r
+                    "In ChannelReader::recv: Failed to read serialized data. Insufficient data: {r}"
                 )
                 .into());
             }
@@ -313,7 +305,7 @@ impl<R: Serialize + DeserializeOwned, M: Serialize + DeserializeOwned> ChildHand
                 panic!("Child did not exit as expected: {:?}", WaitStatus::Exited(pid, c));
             }
             status => {
-                panic!("Child did not exit at all: {:?}", status);
+                panic!("Child did not exit at all: {status:?}");
             }
         }
     }
@@ -451,7 +443,7 @@ where
             std::process::exit(0);
         }
         Err(errno) => {
-            panic!("Failed to fork: {:?}", errno);
+            panic!("Failed to fork: {errno:?}");
         }
     }
 }
@@ -537,7 +529,7 @@ where
                 // Deserialize the result and return it.
                 reader.recv()
             } else {
-                panic!("Child did not exit as expected {:?}", status);
+                panic!("Child did not exit as expected {status:?}");
             }
         }
         Ok(ForkResult::Child) => {
@@ -554,7 +546,7 @@ where
             std::process::exit(0);
         }
         Err(errno) => {
-            panic!("Failed to fork: {:?}", errno);
+            panic!("Failed to fork: {errno:?}");
         }
     }
 }

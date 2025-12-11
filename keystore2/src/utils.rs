@@ -48,13 +48,65 @@ use keystore2_apc_compat::{
     APC_COMPAT_ERROR_SYSTEM_ERROR,
 };
 use keystore2_crypto::{aes_gcm_decrypt, aes_gcm_encrypt, ZVec};
-use log::{info, warn};
+use log::{debug, error, info, warn};
+use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
 use std::iter::IntoIterator;
 use std::thread::sleep;
 use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
+
+/// Newtype holding an integer that represents an Android user ID, corresponding to a user/human
+/// profile (i.e. *not* to a specific UNIX uid assigned to a particular app).
+///
+/// This type uses an `i32` as the underlying integer type in order to match the Rust type used for
+/// AIDL `int` values, which are used to specify user IDs (recall that AIDL has no unsigned integer
+/// types, like Java).  However, other libraries (e.g. the `rustutils` crate) use `u32`,
+/// necessitating some casts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AndroidUserId(pub i32);
+
+/// Newtype holding an integer that represents a per-app uid value (i.e. *not* a user/human user
+/// ID).
+///
+/// The underlying integer type is `i64` to encompass both AIDL `int` and `long` values, as both
+/// types are used to hold uid values in different places on Keystore's external interfaces.  This
+/// also copes with other libraries (e.g. `binder` and `libc`) which use `u32` for uid values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AppUid(pub i64);
+
+impl AppUid {
+    /// Return the user/human profile user ID corresponding to this uid.
+    pub fn owning_user(&self) -> AndroidUserId {
+        AndroidUserId(rustutils::users::multiuser_get_user_id(self.0 as u32) as i32)
+    }
+
+    /// Get the calling uid for the current thread.
+    pub fn calling() -> Self {
+        Self(ThreadState::get_calling_uid() as i64)
+    }
+}
+
+/// Uid for the system.
+pub const AID_SYSTEM: AppUid = AppUid(rustutils::users::AID_SYSTEM as i64);
+
+/// A secure user ID ("sid") corresponding to an `AndroidUserId` that has been registered with a
+/// secure authenticator instance.
+///
+/// The underlying integer type is `i64` to match the AIDL `long` types used in authenticator
+/// HALs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SecureUserId(pub i64);
+
+/// A per-operation authentication challenge value.
+///
+/// The underlying integer type is `i64` to match the AIDL `long` type that is:
+/// - returned by KeyMint in `BeginResult`
+/// - passed on by `keystore2` in the `OperationChallenge` AIDL type on the
+///   `IKeystoreService` AIDL interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Challenge(pub i64);
 
 /// Per RFC 5280 4.1.2.5, an undefined expiration (not-after) field should be set to GeneralizedTime
 /// 999912312359559, which is 253402300799000 ms from Jan 1, 1970.
@@ -80,7 +132,7 @@ pub fn check_keystore_permission(perm: KeystorePerm) -> anyhow::Result<()> {
 pub fn check_grant_permission(access_vec: KeyPermSet, key: &KeyDescriptor) -> anyhow::Result<()> {
     ThreadState::with_calling_sid(|calling_sid| {
         permission::check_grant_permission(
-            ThreadState::get_calling_uid(),
+            AppUid::calling(),
             calling_sid
                 .ok_or_else(Error::sys)
                 .context(ks_err!("Cannot check permission without calling_sid."))?,
@@ -100,7 +152,7 @@ pub fn check_key_permission(
 ) -> anyhow::Result<()> {
     ThreadState::with_calling_sid(|calling_sid| {
         permission::check_key_permission(
-            ThreadState::get_calling_uid(),
+            AppUid::calling(),
             calling_sid
                 .ok_or_else(Error::sys)
                 .context(ks_err!("Cannot check permission without calling_sid."))?,
@@ -170,7 +222,7 @@ fn check_android_permission(permission: &str, err: Error) -> anyhow::Result<()> 
         permission_controller.checkPermission(
             permission,
             ThreadState::get_calling_pid(),
-            ThreadState::get_calling_uid() as i32,
+            AppUid::calling().0 as i32,
         )
     };
     let has_permissions =
@@ -214,11 +266,9 @@ where
 {
     let (format, key_material, mut chars) =
         crate::sw_keyblob::export_key(inner_keyblob, upgrade_params)?;
-    log::debug!(
-        "importing {:?} key material (len={}) with original chars={:?}",
-        format,
+    debug!(
+        "importing {format:?} key material (len={}) with original chars={chars:?}",
         key_material.len(),
-        chars
     );
     let asymmetric = chars.iter().any(|kp| {
         kp.tag == Tag::ALGORITHM
@@ -279,7 +329,7 @@ where
             value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
         });
     }
-    log::debug!("import parameters={import_params:?}");
+    debug!("import parameters={import_params:?}");
 
     let creation_result = {
         let _wp = watchdog::watch(
@@ -382,9 +432,7 @@ where
                 //
                 //    The inner keyblob should still be recognized by the hardware implementation, so
                 //    strip the prefix and attempt a key upgrade.
-                log::info!(
-                    "found apparent km_compat(Keymaster) HW blob, attempt strip-and-upgrade"
-                );
+                info!("found apparent km_compat(Keymaster) HW blob, attempt strip-and-upgrade");
                 let inner_keyblob = &key_blob[km_compat::KEYMASTER_BLOB_HW_PREFIX.len()..];
                 upgrade_keyblob_and_perform_op(
                     km_dev,
@@ -405,7 +453,7 @@ where
                 //    The inner keyblob should be in the format produced by the C++ reference
                 //    implementation of KeyMint.  Extract the key material and import it into the
                 //    current KeyMint device.
-                log::info!("found apparent km_compat(Keymaster) SW blob, attempt strip-and-import");
+                info!("found apparent km_compat(Keymaster) SW blob, attempt strip-and-import");
                 let inner_keyblob = &key_blob[km_compat::KEYMASTER_BLOB_SW_PREFIX.len()..];
                 import_keyblob_and_perform_op(
                     km_dev,
@@ -429,9 +477,7 @@ where
                 //    The inner keyblob should be in the format produced by the C++ reference
                 //    implementation of KeyMint.  Extract the key material and import it into the
                 //    current KeyMint device.
-                log::info!(
-                    "found apparent km_compat.rs(KeyMint) SW blob, attempt strip-and-import"
-                );
+                info!("found apparent km_compat.rs(KeyMint) SW blob, attempt strip-and-import");
                 import_keyblob_and_perform_op(
                     km_dev,
                     inner_keyblob,
@@ -497,12 +543,7 @@ pub const AID_USER_OFFSET: u32 = rustutils::users::AID_USER_OFFSET;
 
 /// AID of the keystore process itself, used for keys that
 /// keystore generates for its own use.
-pub const AID_KEYSTORE: u32 = rustutils::users::AID_KEYSTORE;
-
-/// Extracts the android user from the given uid.
-pub fn uid_to_android_user(uid: u32) -> u32 {
-    rustutils::users::multiuser_get_user_id(uid)
-}
+pub const AID_KEYSTORE: AppUid = AppUid(rustutils::users::AID_KEYSTORE as i64);
 
 /// Merges and filters two lists of key descriptors. The first input list, legacy_descriptors,
 /// is assumed to not be sorted or filtered. As such, all key descriptors in that list whose
@@ -565,7 +606,7 @@ pub(crate) fn estimate_safe_amount_to_return(
         // that the binder overhead is 60% (to be confirmed). So break after
         // 350KB and return a partial list.
         if bytes > response_size_limit {
-            log::warn!(
+            warn!(
                 "{domain:?}:{namespace}: Key descriptors list ({} items after {start_past_alias:?}) \
                  may exceed binder size, returning {count} items est. {bytes} bytes",
                 key_descriptors.len(),
@@ -662,24 +703,101 @@ impl<T: AesGcmKey> AesGcm for T {
     }
 }
 
+/// Get the Binder interface identified by `name`, retrying any failures up to the given
+/// `retry_count`.
 pub(crate) fn retry_get_interface<T: FromIBinder + ?Sized>(
     name: &str,
+    retry_count: usize,
 ) -> Result<Strong<T>, StatusCode> {
-    let retry_count = if cfg!(early_vm) { 5 } else { 1 };
-
-    let mut wait_time = Duration::from_secs(5);
-    for i in 1..retry_count {
-        match binder::get_interface(name) {
-            Ok(res) => return Ok(res),
-            Err(e) => {
-                warn!("failed to get interface {name}. Retry {i}/{retry_count}: {e:?}");
-                sleep(wait_time);
-                wait_time *= 2;
+    let mut attempts = 0;
+    let mut wait_time = Duration::from_secs(1);
+    loop {
+        let err = match binder::get_interface(name) {
+            Ok(res) => {
+                if attempts > 1 {
+                    info!("Success on get_interface({name}) after {attempts} failures!");
+                }
+                return Ok(res);
             }
+            Err(e) => e,
+        };
+        attempts += 1;
+        error!("Failed (attempt {attempts} of {retry_count}) to get_interface {name}: {err:?}");
+        if attempts >= retry_count {
+            error!("Give up retrying after {attempts} failures, return final error: {err:?}");
+            return Err(err);
         }
+        info!("Blocking wait {wait_time:?} before retry of get_interface({name})");
+        sleep(wait_time);
+        wait_time *= 2;
     }
-    if retry_count > 1 {
-        info!("{retry_count}-th (last) retry to get interface: {name}");
+}
+
+/// Return the target SDK version for a given app.
+///
+/// Involves round-trips to PackageManager.
+pub fn target_sdk_for_uid(uid: AppUid) -> Option<i32> {
+    let pm: Strong<dyn IPackageManagerNative> = match binder::get_interface("package_native") {
+        Ok(pm) => pm,
+        Err(e) => {
+            warn!("failed to connect to PackageManager: {e:?}");
+            return None;
+        }
+    };
+
+    let pkg_infos = match pm.getPackageInfoWithSigningInfoForUid(uid.0 as i32) {
+        Ok(Some(infos)) => infos,
+        Ok(None) => {
+            warn!("no package info for {uid:?}");
+            return None;
+        }
+        Err(e) => {
+            warn!("failed to get package info for {uid:?}: {e:?}");
+            return None;
+        }
+    };
+
+    let mut lowest_target_sdk = None;
+    for pkg_info in pkg_infos {
+        let Some(pkg_info) = pkg_info else {
+            continue;
+        };
+        let pkg_name = &pkg_info.packageName;
+        if pkg_name.is_empty() {
+            continue;
+        }
+        match pm.getTargetSdkVersionForPackage(pkg_name) {
+            Err(e) => {
+                warn!("failed to get target SDK version for {uid:?} '{pkg_name}': {e:?}");
+                continue;
+            }
+            Ok(target_sdk) if target_sdk <= 0 => {
+                warn!("unexpected target SDK version {target_sdk} for {uid:?} '{pkg_name}'");
+                continue;
+            }
+            Ok(target_sdk) => {
+                info!("{uid:?} '{pkg_name}' has target SDK {target_sdk:?}");
+                if let Some(prev_lowest) = lowest_target_sdk {
+                    if target_sdk < prev_lowest {
+                        lowest_target_sdk = Some(target_sdk);
+                    }
+                } else {
+                    lowest_target_sdk = Some(target_sdk);
+                }
+            }
+        };
     }
-    binder::get_interface(name)
+
+    info!("{uid:?} has target SDK {lowest_target_sdk:?}");
+    lowest_target_sdk
+}
+
+/// Enable logging in unit tests.
+#[cfg(test)]
+pub fn init_test_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_tag("keystore2_test")
+            .with_max_level(log::LevelFilter::Debug),
+    );
 }

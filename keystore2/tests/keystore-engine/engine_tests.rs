@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! This crate tests the keystore-engine library.
+//!
+//! The keystore-engine library provides a BoringSSL crypto engine where private
+//! key operations are performed by Android Keystore (i.e. via the `IKeystoreService`
+//! AIDL interface).  This allows some system components to use the BoringSSL API
+//! from C++ code, but still have the underlying key material held in secure hardware.
+//!
+//! The keystore-engine library is not widely exposed, nor is it vendor stable, so
+//! these tests are separate from the general tests of `IKeystoreService` (which _is_
+//! vendor-stable).
+
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, Digest::Digest, EcCurve::EcCurve, KeyPurpose::KeyPurpose,
     PaddingMode::PaddingMode,
@@ -20,12 +31,27 @@ use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, IKeystoreService::IKeystoreService, KeyDescriptor::KeyDescriptor,
     KeyPermission::KeyPermission,
 };
-use keystore2_test_utils::ffi_test_utils::perform_crypto_op_using_keystore_engine;
 use keystore2_test_utils::{
-    authorizations::AuthSetBuilder, get_keystore_service, run_as, SecLevel,
+    authorizations::AuthSetBuilder, get_keystore_service, key_generations::Error, run_as, SecLevel,
 };
 use openssl::x509::X509;
 use rustutils::users::AID_USER_OFFSET;
+
+extern "C" {
+    // In ffi_engine.{cpp,hpp}
+    pub fn performCryptoOpUsingKeystoreEngine(grant_id: i64) -> bool;
+}
+
+/// Performs crypto operation using Keystore-Engine APIs.
+pub fn perform_crypto_op_using_keystore_engine(grant_id: i64) -> Result<(), Error> {
+    // SAFETY: no memory passed over FFI boundary.
+    let success = unsafe { performCryptoOpUsingKeystoreEngine(grant_id) };
+    if success {
+        Ok(())
+    } else {
+        Err(Error::Keystore2EngineOpFailed)
+    }
+}
 
 fn generate_rsa_key_and_grant_to_user(
     sl: &SecLevel,
@@ -137,7 +163,7 @@ fn perform_crypto_op_using_granted_key(
     grant_key_nspace: i64,
 ) {
     // Load the granted key from Keystore2-Engine API and perform crypto operations.
-    assert!(perform_crypto_op_using_keystore_engine(grant_key_nspace).unwrap());
+    assert!(perform_crypto_op_using_keystore_engine(grant_key_nspace).is_ok());
 
     // Delete the granted key.
     keystore2

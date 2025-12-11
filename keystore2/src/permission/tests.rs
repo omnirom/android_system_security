@@ -135,11 +135,16 @@ fn check_keystore_permission_test() -> Result<()> {
 fn check_grant_permission_app() -> Result<()> {
     let system_server_ctx = Context::new("u:r:system_server:s0")?;
     let key = KeyDescriptor { domain: Domain::APP, nspace: 0, alias: None, blob: None };
-    check_grant_permission(0, &system_server_ctx, SYSTEM_SERVER_PERMISSIONS_NO_GRANT, &key)
+    check_grant_permission(AppUid(0), &system_server_ctx, SYSTEM_SERVER_PERMISSIONS_NO_GRANT, &key)
         .expect("Grant permission check failed.");
 
     // attempts to grant the grant permission must always fail even when privileged.
-    assert_perm_failed!(check_grant_permission(0, &system_server_ctx, KeyPerm::Grant.into(), &key));
+    assert_perm_failed!(check_grant_permission(
+        AppUid(0),
+        &system_server_ctx,
+        KeyPerm::Grant.into(),
+        &key
+    ));
     Ok(())
 }
 
@@ -153,12 +158,12 @@ fn check_grant_permission_selinux() -> Result<()> {
         blob: None,
     };
     if is_su {
-        assert!(check_grant_permission(0, &sctx, NOT_GRANT_PERMS, &key).is_ok());
+        assert!(check_grant_permission(AppUid(0), &sctx, NOT_GRANT_PERMS, &key).is_ok());
         // attempts to grant the grant permission must always fail even when privileged.
-        assert_perm_failed!(check_grant_permission(0, &sctx, KeyPerm::Grant.into(), &key));
+        assert_perm_failed!(check_grant_permission(AppUid(0), &sctx, KeyPerm::Grant.into(), &key));
     } else {
         // unprivileged grant attempts always fail. shell does not have the grant permission.
-        assert_perm_failed!(check_grant_permission(0, &sctx, UNPRIV_PERMS, &key));
+        assert_perm_failed!(check_grant_permission(AppUid(0), &sctx, UNPRIV_PERMS, &key));
     }
     Ok(())
 }
@@ -168,7 +173,7 @@ fn check_key_permission_domain_grant() -> Result<()> {
     let key = KeyDescriptor { domain: Domain::GRANT, nspace: 0, alias: None, blob: None };
 
     assert_perm_failed!(check_key_permission(
-        0,
+        AppUid(0),
         &selinux::Context::new("ignored").unwrap(),
         KeyPerm::Grant,
         &key,
@@ -176,7 +181,7 @@ fn check_key_permission_domain_grant() -> Result<()> {
     ));
 
     check_key_permission(
-        0,
+        AppUid(0),
         &selinux::Context::new("ignored").unwrap(),
         KeyPerm::Use,
         &key,
@@ -192,28 +197,66 @@ fn check_key_permission_domain_app() -> Result<()> {
 
     let key = KeyDescriptor { domain: Domain::APP, nspace: 0, alias: None, blob: None };
 
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::Use, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::Delete, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::GetInfo, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::Rebind, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::Update, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::Grant, &key, &None).is_ok());
-    assert!(check_key_permission(0, &system_server_ctx, KeyPerm::UseDevId, &key, &None).is_ok());
-    assert!(check_key_permission(0, &gmscore_app, KeyPerm::GenUniqueId, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::Use, &key, &None).is_ok());
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::Delete, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::GetInfo, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::Rebind, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::Update, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::Grant, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &system_server_ctx, KeyPerm::UseDevId, &key, &None).is_ok()
+    );
+    assert!(
+        check_key_permission(AppUid(0), &gmscore_app, KeyPerm::GenUniqueId, &key, &None).is_ok()
+    );
 
-    assert!(check_key_permission(0, &shell_ctx, KeyPerm::Use, &key, &None).is_ok());
-    assert!(check_key_permission(0, &shell_ctx, KeyPerm::Delete, &key, &None).is_ok());
-    assert!(check_key_permission(0, &shell_ctx, KeyPerm::GetInfo, &key, &None).is_ok());
-    assert!(check_key_permission(0, &shell_ctx, KeyPerm::Rebind, &key, &None).is_ok());
-    assert!(check_key_permission(0, &shell_ctx, KeyPerm::Update, &key, &None).is_ok());
-    assert_perm_failed!(check_key_permission(0, &shell_ctx, KeyPerm::ReqForcedOp, &key, &None));
-    assert_perm_failed!(check_key_permission(0, &shell_ctx, KeyPerm::ManageBlob, &key, &None));
-    assert_perm_failed!(check_key_permission(0, &shell_ctx, KeyPerm::UseDevId, &key, &None));
-    assert_perm_failed!(check_key_permission(0, &shell_ctx, KeyPerm::GenUniqueId, &key, &None));
+    assert!(check_key_permission(AppUid(0), &shell_ctx, KeyPerm::Use, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &shell_ctx, KeyPerm::Delete, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &shell_ctx, KeyPerm::GetInfo, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &shell_ctx, KeyPerm::Rebind, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &shell_ctx, KeyPerm::Update, &key, &None).is_ok());
+    assert_perm_failed!(check_key_permission(
+        AppUid(0),
+        &shell_ctx,
+        KeyPerm::ReqForcedOp,
+        &key,
+        &None
+    ));
+    assert_perm_failed!(check_key_permission(
+        AppUid(0),
+        &shell_ctx,
+        KeyPerm::ManageBlob,
+        &key,
+        &None
+    ));
+    assert_perm_failed!(check_key_permission(
+        AppUid(0),
+        &shell_ctx,
+        KeyPerm::UseDevId,
+        &key,
+        &None
+    ));
+    assert_perm_failed!(check_key_permission(
+        AppUid(0),
+        &shell_ctx,
+        KeyPerm::GenUniqueId,
+        &key,
+        &None
+    ));
 
     // Also make sure that the permission fails if the caller is not the owner.
     assert_perm_failed!(check_key_permission(
-        1, // the owner is 0
+        AppUid(1), // the owner is 0
         &system_server_ctx,
         KeyPerm::Use,
         &key,
@@ -221,7 +264,7 @@ fn check_key_permission_domain_app() -> Result<()> {
     ));
     // Unless there was a grant.
     assert!(check_key_permission(
-        1,
+        AppUid(1),
         &system_server_ctx,
         KeyPerm::Use,
         &key,
@@ -230,7 +273,7 @@ fn check_key_permission_domain_app() -> Result<()> {
     .is_ok());
     // But fail if the grant did not cover the requested permission.
     assert_perm_failed!(check_key_permission(
-        1,
+        AppUid(1),
         &system_server_ctx,
         KeyPerm::Use,
         &key,
@@ -250,24 +293,42 @@ fn check_key_permission_domain_selinux() -> Result<()> {
         blob: None,
     };
 
-    assert!(check_key_permission(0, &sctx, KeyPerm::Use, &key, &None).is_ok());
-    assert!(check_key_permission(0, &sctx, KeyPerm::Delete, &key, &None).is_ok());
-    assert!(check_key_permission(0, &sctx, KeyPerm::GetInfo, &key, &None).is_ok());
-    assert!(check_key_permission(0, &sctx, KeyPerm::Rebind, &key, &None).is_ok());
-    assert!(check_key_permission(0, &sctx, KeyPerm::Update, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::Use, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::Delete, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::GetInfo, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::Rebind, &key, &None).is_ok());
+    assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::Update, &key, &None).is_ok());
 
     if is_su {
-        assert!(check_key_permission(0, &sctx, KeyPerm::Grant, &key, &None).is_ok());
-        assert!(check_key_permission(0, &sctx, KeyPerm::ManageBlob, &key, &None).is_ok());
-        assert!(check_key_permission(0, &sctx, KeyPerm::UseDevId, &key, &None).is_ok());
-        assert!(check_key_permission(0, &sctx, KeyPerm::GenUniqueId, &key, &None).is_ok());
-        assert!(check_key_permission(0, &sctx, KeyPerm::ReqForcedOp, &key, &None).is_ok());
+        assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::Grant, &key, &None).is_ok());
+        assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::ManageBlob, &key, &None).is_ok());
+        assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::UseDevId, &key, &None).is_ok());
+        assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::GenUniqueId, &key, &None).is_ok());
+        assert!(check_key_permission(AppUid(0), &sctx, KeyPerm::ReqForcedOp, &key, &None).is_ok());
     } else {
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::Grant, &key, &None));
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::ReqForcedOp, &key, &None));
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::ManageBlob, &key, &None));
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::UseDevId, &key, &None));
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::GenUniqueId, &key, &None));
+        assert_perm_failed!(check_key_permission(AppUid(0), &sctx, KeyPerm::Grant, &key, &None));
+        assert_perm_failed!(check_key_permission(
+            AppUid(0),
+            &sctx,
+            KeyPerm::ReqForcedOp,
+            &key,
+            &None
+        ));
+        assert_perm_failed!(check_key_permission(
+            AppUid(0),
+            &sctx,
+            KeyPerm::ManageBlob,
+            &key,
+            &None
+        ));
+        assert_perm_failed!(check_key_permission(AppUid(0), &sctx, KeyPerm::UseDevId, &key, &None));
+        assert_perm_failed!(check_key_permission(
+            AppUid(0),
+            &sctx,
+            KeyPerm::GenUniqueId,
+            &key,
+            &None
+        ));
     }
     Ok(())
 }
@@ -279,9 +340,9 @@ fn check_key_permission_domain_blob() -> Result<()> {
         KeyDescriptor { domain: Domain::BLOB, nspace: namespace as i64, alias: None, blob: None };
 
     if is_su {
-        check_key_permission(0, &sctx, KeyPerm::Use, &key, &None)
+        check_key_permission(AppUid(0), &sctx, KeyPerm::Use, &key, &None)
     } else {
-        assert_perm_failed!(check_key_permission(0, &sctx, KeyPerm::Use, &key, &None));
+        assert_perm_failed!(check_key_permission(AppUid(0), &sctx, KeyPerm::Use, &key, &None));
         Ok(())
     }
 }
@@ -293,7 +354,7 @@ fn check_key_permission_domain_key_id() -> Result<()> {
     assert_eq!(
         Some(&KsError::sys()),
         check_key_permission(
-            0,
+            AppUid(0),
             &selinux::Context::new("ignored").unwrap(),
             KeyPerm::Use,
             &key,

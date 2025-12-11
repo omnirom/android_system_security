@@ -18,14 +18,14 @@ use crate::ks_err;
 use crate::{
     error::{Error as KsError, ResponseCode},
     key_parameter::{KeyParameter, KeyParameterValue},
-    utils::uid_to_android_user,
-    utils::AesGcm,
+    utils::{AesGcm, AndroidUserId, AppUid},
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     SecurityLevel::SecurityLevel, Tag::Tag, TagType::TagType,
 };
 use anyhow::{Context, Result};
 use keystore2_crypto::{aes_gcm_decrypt, Password, ZVec};
+use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::{convert::TryInto, fs::File, path::Path, path::PathBuf};
@@ -689,7 +689,7 @@ impl LegacyBlobLoader {
 
     fn read_characteristics_file(
         &self,
-        uid: u32,
+        uid: AppUid,
         prefix: &str,
         alias: &str,
         hw_sec_level: SecurityLevel,
@@ -756,7 +756,7 @@ impl LegacyBlobLoader {
         Self::KNOWN_KEYSTORE_PREFIXES.iter().any(|prefix| encoded_alias.starts_with(prefix))
     }
 
-    fn read_km_blob_file(&self, uid: u32, alias: &str) -> Result<Option<(Blob, String)>> {
+    fn read_km_blob_file(&self, uid: AppUid, alias: &str) -> Result<Option<(Blob, String)>> {
         let mut iter = ["USRPKEY", "USRSKEY"].iter();
 
         let (blob, prefix) = loop {
@@ -805,7 +805,7 @@ impl LegacyBlobLoader {
     /// Read a legacy keystore entry blob.
     pub fn read_legacy_keystore_entry<F>(
         &self,
-        uid: u32,
+        uid: AppUid,
         alias: &str,
         decrypt: F,
     ) -> Result<Option<Vec<u8>>>
@@ -823,14 +823,14 @@ impl LegacyBlobLoader {
         Ok(blob.and_then(|blob| match blob.value {
             BlobValue::Generic(blob) => Some(blob),
             _ => {
-                log::info!("Unexpected legacy keystore entry blob type. Ignoring");
+                info!("Unexpected legacy keystore entry blob type. Ignoring");
                 None
             }
         }))
     }
 
     /// Remove a legacy keystore entry by the name alias with owner uid.
-    pub fn remove_legacy_keystore_entry(&self, uid: u32, alias: &str) -> Result<bool> {
+    pub fn remove_legacy_keystore_entry(&self, uid: AppUid, alias: &str) -> Result<bool> {
         let path = match self.make_legacy_keystore_entry_filename(uid, alias) {
             Some(path) => path,
             None => return Ok(false),
@@ -843,18 +843,18 @@ impl LegacyBlobLoader {
             }
         }
 
-        let user_id = uid_to_android_user(uid);
-        self.remove_user_dir_if_empty(user_id)
-            .context(ks_err!("Trying to remove empty user dir."))?;
+        let user = uid.owning_user();
+        self.remove_user_dir_if_empty(user)
+            .context(ks_err!("Trying to remove empty user dir for {user:?}"))?;
         Ok(true)
     }
 
     /// List all entries belonging to the given uid.
-    pub fn list_legacy_keystore_entries_for_uid(&self, uid: u32) -> Result<Vec<String>> {
+    pub fn list_legacy_keystore_entries_for_uid(&self, uid: AppUid) -> Result<Vec<String>> {
         let mut path = self.path.clone();
-        let user_id = uid_to_android_user(uid);
-        path.push(format!("user_{}", user_id));
-        let uid_str = uid.to_string();
+        let user = uid.owning_user();
+        path.push(format!("user_{}", user.0));
+        let uid_str = uid.0.to_string();
         let dir = match Self::with_retry_interrupted(|| fs::read_dir(path.as_path())) {
             Ok(dir) => dir,
             Err(e) => match e.kind() {
@@ -894,74 +894,76 @@ impl LegacyBlobLoader {
     /// KNOWN_KEYSTORE_PREFIXES.
     pub fn list_legacy_keystore_entries_for_user(
         &self,
-        user_id: u32,
-    ) -> Result<HashMap<u32, HashSet<String>>> {
-        let user_entries = self.list_user(user_id).context(ks_err!("Trying to list user."))?;
+        user: AndroidUserId,
+    ) -> Result<HashMap<AppUid, HashSet<String>>> {
+        let user_entries = self.list_user(user).context(ks_err!("Trying to list {user:?}"))?;
 
-        let result =
-            user_entries.into_iter().fold(HashMap::<u32, HashSet<String>>::new(), |mut acc, v| {
+        let result = user_entries.into_iter().fold(
+            HashMap::<AppUid, HashSet<String>>::new(),
+            |mut acc, v| {
                 if let Some(sep_pos) = v.find('_') {
                     if let Ok(uid) = v[0..sep_pos].parse::<u32>() {
                         if let Some(alias) = Self::extract_legacy_alias(&v[sep_pos + 1..]) {
-                            let entry = acc.entry(uid).or_default();
+                            let entry = acc.entry(AppUid(uid as i64)).or_default();
                             entry.insert(alias);
                         }
                     }
                 }
                 acc
-            });
+            },
+        );
         Ok(result)
     }
 
     /// This function constructs the legacy blob file name which has the form:
     /// user_<android user id>/<uid>_<alias>. Legacy blob file names must not use
     /// known keystore prefixes.
-    fn make_legacy_keystore_entry_filename(&self, uid: u32, alias: &str) -> Option<PathBuf> {
+    fn make_legacy_keystore_entry_filename(&self, uid: AppUid, alias: &str) -> Option<PathBuf> {
         // Legacy entries must not use known keystore prefixes.
         if Self::is_keystore_alias(alias) {
-            log::warn!(
+            warn!(
                 "Known keystore prefixes cannot be used with legacy keystore -> ignoring request."
             );
             return None;
         }
 
         let mut path = self.path.clone();
-        let user_id = uid_to_android_user(uid);
+        let user = uid.owning_user();
         let encoded_alias = Self::encode_alias(alias);
-        path.push(format!("user_{}", user_id));
-        path.push(format!("{}_{}", uid, encoded_alias));
+        path.push(format!("user_{}", user.0));
+        path.push(format!("{}_{}", uid.0, encoded_alias));
         Some(path)
     }
 
     /// This function constructs the blob file name which has the form:
     /// user_<android user id>/<uid>_<prefix>_<alias>.
-    fn make_blob_filename(&self, uid: u32, alias: &str, prefix: &str) -> PathBuf {
-        let user_id = uid_to_android_user(uid);
-        let encoded_alias = Self::encode_alias(&format!("{}_{}", prefix, alias));
-        let mut path = self.make_user_path_name(user_id);
-        path.push(format!("{}_{}", uid, encoded_alias));
+    fn make_blob_filename(&self, uid: AppUid, alias: &str, prefix: &str) -> PathBuf {
+        let user = uid.owning_user();
+        let encoded_alias = Self::encode_alias(&format!("{prefix}_{alias}"));
+        let mut path = self.make_user_path_name(user);
+        path.push(format!("{}_{}", uid.0, encoded_alias));
         path
     }
 
     /// This function constructs the characteristics file name which has the form:
     /// user_<android user id>/.<uid>_chr_<prefix>_<alias>.
-    fn make_chr_filename(&self, uid: u32, alias: &str, prefix: &str) -> PathBuf {
-        let user_id = uid_to_android_user(uid);
-        let encoded_alias = Self::encode_alias(&format!("{}_{}", prefix, alias));
+    fn make_chr_filename(&self, uid: AppUid, alias: &str, prefix: &str) -> PathBuf {
+        let user_id = uid.owning_user();
+        let encoded_alias = Self::encode_alias(&format!("{prefix}_{alias}"));
         let mut path = self.make_user_path_name(user_id);
-        path.push(format!(".{}_chr_{}", uid, encoded_alias));
+        path.push(format!(".{}_chr_{}", uid.0, encoded_alias));
         path
     }
 
-    fn make_super_key_filename(&self, user_id: u32) -> PathBuf {
-        let mut path = self.make_user_path_name(user_id);
+    fn make_super_key_filename(&self, user: AndroidUserId) -> PathBuf {
+        let mut path = self.make_user_path_name(user);
         path.push(".masterkey");
         path
     }
 
-    fn make_user_path_name(&self, user_id: u32) -> PathBuf {
+    fn make_user_path_name(&self, user: AndroidUserId) -> PathBuf {
         let mut path = self.path.clone();
-        path.push(format!("user_{}", user_id));
+        path.push(format!("user_{}", user.0));
         path
     }
 
@@ -973,7 +975,7 @@ impl LegacyBlobLoader {
         for entry in dir {
             if (*entry.context(ks_err!("Trying to access dir entry"))?.file_name())
                 .to_str()
-                .map_or(false, |f| f.starts_with("user_"))
+                .is_some_and(|f| f.starts_with("user_"))
             {
                 return Ok(false);
             }
@@ -983,9 +985,9 @@ impl LegacyBlobLoader {
 
     /// Returns if the legacy blob database is empty for a given user, i.e., there are no entries
     /// matching "user_*" in the database dir.
-    pub fn is_empty_user(&self, user_id: u32) -> Result<bool> {
+    pub fn is_empty_user(&self, user: AndroidUserId) -> Result<bool> {
         let mut user_path = self.path.clone();
-        user_path.push(format!("user_{}", user_id));
+        user_path.push(format!("user_{}", user.0));
         if !user_path.as_path().is_dir() {
             return Ok(true);
         }
@@ -1008,8 +1010,8 @@ impl LegacyBlobLoader {
 
     /// List all entries for a given user. The strings are unchanged file names, i.e.,
     /// encoded with UID prefix.
-    fn list_user(&self, user_id: u32) -> Result<Vec<String>> {
-        let path = self.make_user_path_name(user_id);
+    fn list_user(&self, user: AndroidUserId) -> Result<Vec<String>> {
+        let path = self.make_user_path_name(user);
         let dir = match Self::with_retry_interrupted(|| fs::read_dir(path.as_path())) {
             Ok(dir) => dir,
             Err(e) => match e.kind() {
@@ -1034,32 +1036,34 @@ impl LegacyBlobLoader {
     /// to sets of decoded aliases.
     pub fn list_keystore_entries_for_user(
         &self,
-        user_id: u32,
-    ) -> Result<HashMap<u32, HashSet<String>>> {
-        let user_entries = self.list_user(user_id).context(ks_err!("Trying to list user."))?;
+        user: AndroidUserId,
+    ) -> Result<HashMap<AppUid, HashSet<String>>> {
+        let user_entries = self.list_user(user).context(ks_err!("Trying to list user."))?;
 
-        let result =
-            user_entries.into_iter().fold(HashMap::<u32, HashSet<String>>::new(), |mut acc, v| {
+        let result = user_entries.into_iter().fold(
+            HashMap::<AppUid, HashSet<String>>::new(),
+            |mut acc, v| {
                 if let Some(sep_pos) = v.find('_') {
                     if let Ok(uid) = v[0..sep_pos].parse::<u32>() {
                         if let Some(alias) = Self::extract_keystore_alias(&v[sep_pos + 1..]) {
-                            let entry = acc.entry(uid).or_default();
+                            let entry = acc.entry(AppUid(uid as i64)).or_default();
                             entry.insert(alias);
                         }
                     }
                 }
                 acc
-            });
+            },
+        );
         Ok(result)
     }
 
     /// List all keystore entries belonging to the given uid.
-    pub fn list_keystore_entries_for_uid(&self, uid: u32) -> Result<Vec<String>> {
-        let user_id = uid_to_android_user(uid);
+    pub fn list_keystore_entries_for_uid(&self, uid: AppUid) -> Result<Vec<String>> {
+        let user = uid.owning_user();
 
-        let user_entries = self.list_user(user_id).context(ks_err!("Trying to list user."))?;
+        let user_entries = self.list_user(user).context(ks_err!("Trying to list {user:?}"))?;
 
-        let uid_str = format!("{}_", uid);
+        let uid_str = format!("{}_", uid.0);
 
         let mut result: Vec<String> = user_entries
             .into_iter()
@@ -1094,7 +1098,7 @@ impl LegacyBlobLoader {
 
     /// Deletes a keystore entry. Also removes the user_<uid> directory on the
     /// last migration.
-    pub fn remove_keystore_entry(&self, uid: u32, alias: &str) -> Result<bool> {
+    pub fn remove_keystore_entry(&self, uid: AppUid, alias: &str) -> Result<bool> {
         let mut something_was_deleted = false;
         let prefixes = ["USRPKEY", "USRSKEY"];
         for prefix in &prefixes {
@@ -1104,17 +1108,17 @@ impl LegacyBlobLoader {
                     // Only a subset of keys are expected.
                     ErrorKind::NotFound => continue,
                     // Log error but ignore.
-                    _ => log::error!("Error while deleting key blob entries. {:?}", e),
+                    _ => error!("Error while deleting key blob entries: {e:?}"),
                 }
             }
             let path = self.make_chr_filename(uid, alias, prefix);
             if let Err(e) = Self::with_retry_interrupted(|| fs::remove_file(path.as_path())) {
                 match e.kind() {
                     ErrorKind::NotFound => {
-                        log::info!("No characteristics file found for legacy key blob.")
+                        info!("No characteristics file found for legacy key blob.")
                     }
                     // Log error but ignore.
-                    _ => log::error!("Error while deleting key blob entries. {:?}", e),
+                    _ => error!("Error while deleting key blob entries: {e:?}"),
                 }
             }
             something_was_deleted = true;
@@ -1131,16 +1135,16 @@ impl LegacyBlobLoader {
                     // USRCERT and CACERT are optional either or both may or may not be present.
                     ErrorKind::NotFound => continue,
                     // Log error but ignore.
-                    _ => log::error!("Error while deleting key blob entries. {:?}", e),
+                    _ => error!("Error while deleting key blob entries: {e:?}"),
                 }
                 something_was_deleted = true;
             }
         }
 
         if something_was_deleted {
-            let user_id = uid_to_android_user(uid);
-            self.remove_user_dir_if_empty(user_id)
-                .context(ks_err!("Trying to remove empty user dir."))?;
+            let user = uid.owning_user();
+            self.remove_user_dir_if_empty(user)
+                .context(ks_err!("Trying to remove empty user dir for {user:?}"))?;
         }
 
         Ok(something_was_deleted)
@@ -1151,15 +1155,15 @@ impl LegacyBlobLoader {
     /// The function overwrites existing destination files silently. If the source does not exist,
     /// this function has no side effect and returns successfully.
     fn move_keystore_file_if_exists<F>(
-        src_uid: u32,
-        dest_uid: u32,
+        src_uid: AppUid,
+        dest_uid: AppUid,
         src_alias: &str,
         dest_alias: &str,
         prefix: &str,
         make_filename: F,
     ) -> Result<()>
     where
-        F: Fn(u32, &str, &str) -> PathBuf,
+        F: Fn(AppUid, &str, &str) -> PathBuf,
     {
         let src_path = make_filename(src_uid, src_alias, prefix);
         let dest_path = make_filename(dest_uid, dest_alias, prefix);
@@ -1173,8 +1177,8 @@ impl LegacyBlobLoader {
     /// component. Moves across android users are not permitted.
     pub fn move_keystore_entry(
         &self,
-        src_uid: u32,
-        dest_uid: u32,
+        src_uid: AppUid,
+        dest_uid: AppUid,
         src_alias: &str,
         dest_alias: &str,
     ) -> Result<()> {
@@ -1183,7 +1187,7 @@ impl LegacyBlobLoader {
             return Ok(());
         }
 
-        if uid_to_android_user(src_uid) != uid_to_android_user(dest_uid) {
+        if src_uid.owning_user() != dest_uid.owning_user() {
             return Err(Error::AndroidUserMismatch).context(ks_err!());
         }
 
@@ -1223,9 +1227,9 @@ impl LegacyBlobLoader {
         Ok(())
     }
 
-    fn remove_user_dir_if_empty(&self, user_id: u32) -> Result<()> {
-        if self.is_empty_user(user_id).context(ks_err!("Trying to check for empty user dir."))? {
-            let user_path = self.make_user_path_name(user_id);
+    fn remove_user_dir_if_empty(&self, user: AndroidUserId) -> Result<()> {
+        if self.is_empty_user(user).context(ks_err!("Trying to check for empty user dir."))? {
+            let user_path = self.make_user_path_name(user);
             Self::with_retry_interrupted(|| fs::remove_dir(user_path.as_path())).ok();
         }
         Ok(())
@@ -1234,7 +1238,7 @@ impl LegacyBlobLoader {
     /// Load a legacy key blob entry by uid and alias.
     pub fn load_by_uid_alias(
         &self,
-        uid: u32,
+        uid: AppUid,
         alias: &str,
         super_key: &Option<Arc<dyn AesGcm>>,
     ) -> Result<(Option<(Blob, LegacyKeyCharacteristics)>, Option<Vec<u8>>, Option<Vec<u8>>)> {
@@ -1302,13 +1306,13 @@ impl LegacyBlobLoader {
     }
 
     /// Returns true if the given user has a super key.
-    pub fn has_super_key(&self, user_id: u32) -> bool {
-        self.make_super_key_filename(user_id).is_file()
+    pub fn has_super_key(&self, user: AndroidUserId) -> bool {
+        self.make_super_key_filename(user).is_file()
     }
 
     /// Load and decrypt legacy super key blob.
-    pub fn load_super_key(&self, user_id: u32, pw: &Password) -> Result<Option<ZVec>> {
-        let path = self.make_super_key_filename(user_id);
+    pub fn load_super_key(&self, user: AndroidUserId, pw: &Password) -> Result<Option<ZVec>> {
+        let path = self.make_super_key_filename(user);
         let blob = Self::read_generic_blob(&path).context(ks_err!("While loading super key."))?;
 
         let blob = match blob {
@@ -1340,11 +1344,11 @@ impl LegacyBlobLoader {
     /// Removes the super key for the given user from the legacy database.
     /// If this was the last entry in the user's database, this function removes
     /// the user_<uid> directory as well.
-    pub fn remove_super_key(&self, user_id: u32) {
-        let path = self.make_super_key_filename(user_id);
+    pub fn remove_super_key(&self, user: AndroidUserId) {
+        let path = self.make_super_key_filename(user);
         Self::with_retry_interrupted(|| fs::remove_file(path.as_path())).ok();
-        if self.is_empty_user(user_id).ok().unwrap_or(false) {
-            let path = self.make_user_path_name(user_id);
+        if self.is_empty_user(user).ok().unwrap_or(false) {
+            let path = self.make_user_path_name(user);
             Self::with_retry_interrupted(|| fs::remove_dir(path.as_path())).ok();
         }
     }

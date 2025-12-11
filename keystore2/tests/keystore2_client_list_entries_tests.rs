@@ -616,6 +616,8 @@ fn keystore2_list_entries_batched_validate_count_and_order_success() {
                 ALIAS_PREFIX.to_owned() + "_5",
             ],
         );
+
+        delete_all_entries(&sl.keystore2);
     };
 
     // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting

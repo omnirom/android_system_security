@@ -32,4 +32,7 @@ enum AtomID {
     KEY_OPERATION_WITH_GENERAL_INFO = 10123,
     RKP_ERROR_STATS = 10124,
     CRASH_STATS = 10125,
+
+    // Atoms defined as extensions of the Atom proto message.
+    KEYS_PER_UID = 10248,
 }

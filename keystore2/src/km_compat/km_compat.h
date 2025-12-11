@@ -248,4 +248,6 @@ class KeystoreCompatService : public BnKeystoreCompatService {
     ScopedAStatus getSharedSecret(KeyMintSecurityLevel in_securityLevel,
                                   std::shared_ptr<ISharedSecret>* _aidl_return) override;
     ScopedAStatus getSecureClock(std::shared_ptr<ISecureClock>* _aidl_return) override;
+
+    binder_status_t dump(int fd, const char** args, uint32_t numArgs) override;
 };

@@ -38,8 +38,8 @@ rust_library {
 
 rust_test {
     name: "keystore2_km_compat_test",
-    crate_name: "keystore2",
-    srcs: ["lib.rs"],
+    crate_name: "keystore2_km_compat_test",
+    srcs: ["tests.rs"],
     test_suites: ["general-tests"],
     auto_gen_config: true,
     defaults: [
@@ -47,6 +47,7 @@ rust_test {
     ],
     rustlibs: [
         "android.security.compat-rust",
+        "libkeystore2_km_compat",
     ],
     shared_libs: [
         "libkm_compat_service",
@@ -58,7 +59,6 @@ cc_library {
     srcs: ["km_compat.cpp"],
     defaults: [
         "keymint_use_latest_hal_aidl_ndk_shared",
-        "keystore2_use_latest_aidl_ndk_shared",
     ],
     shared_libs: [
         "android.hardware.keymaster@3.0",
@@ -72,7 +72,9 @@ cc_library {
         "libcrypto",
         "libhidlbase",
         "libkeymaster4_1support",
-        "libkeymint",
+        // The C++ KeyMint implementation actually only supports KeyMint v4, but pretend
+        // it is the latest version to avoid mismatched AIDL versions.
+        "libkeymint_fake_latest",
         "libkeymint_support",
         "libkeystore2_crypto",
         "libutils",
@@ -86,8 +88,6 @@ cc_library {
         "keymint_use_latest_hal_aidl_ndk_shared",
     ],
     shared_libs: [
-        "android.hardware.security.secureclock-V1-ndk",
-        "android.hardware.security.sharedsecret-V1-ndk",
         "android.security.compat-ndk",
         "libbinder_ndk",
         "libcrypto",
@@ -112,7 +112,6 @@ cc_test {
     ],
     defaults: [
         "keymint_use_latest_hal_aidl_ndk_shared",
-        "keystore2_use_latest_aidl_ndk_shared",
     ],
     shared_libs: [
         "android.hardware.keymaster@3.0",

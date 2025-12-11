@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Context, Result};
+use log::info;
 use rusqlite::{params, OptionalExtension, Transaction};
 
 fn create_or_get_version(tx: &Transaction, current_version: u32) -> Result<u32> {
@@ -82,11 +83,11 @@ where
     let mut db_version = create_or_get_version(tx, current_version)
         .context("In upgrade_database: Failed to get database version.")?;
     while db_version < current_version {
-        log::info!("Current DB version={db_version}, perform upgrade");
+        info!("Current DB version={db_version}, perform upgrade");
         db_version = upgraders[db_version as usize](tx).with_context(|| {
-            format!("In upgrade_database: Trying to upgrade from db version {}.", db_version)
+            format!("In upgrade_database: Trying to upgrade from db version {db_version}.")
         })?;
-        log::info!("DB upgrade successful, current DB version now={db_version}");
+        info!("DB upgrade successful, current DB version now={db_version}");
     }
     update_version(tx, db_version).context("In upgrade_database.")
 }

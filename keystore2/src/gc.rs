@@ -27,6 +27,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_task::AsyncTask;
+use log::error;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
@@ -148,7 +149,7 @@ impl GcInternal {
             return;
         }
         if let Err(e) = self.process_one_key() {
-            log::error!("Error trying to delete blob entry. {:?}", e);
+            error!("Error trying to delete blob entry: {e:?}");
         }
         // Schedule the next step. This gives high priority requests a chance to interleave.
         if !self.deleted_blob_ids.is_empty() {

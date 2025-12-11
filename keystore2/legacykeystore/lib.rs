@@ -21,14 +21,18 @@ use android_security_legacykeystore::aidl::android::security::legacykeystore::{
 };
 use android_security_legacykeystore::binder::{
     BinderFeatures, ExceptionCode, Result as BinderResult, Status as BinderStatus, Strong,
-    ThreadState,
 };
 use anyhow::{Context, Result};
 use keystore2::{
-    async_task::AsyncTask, error::anyhow_error_to_cstring, globals::SUPER_KEY,
-    legacy_blob::LegacyBlobLoader, maintenance::DeleteListener, maintenance::Domain,
-    utils::uid_to_android_user, utils::watchdog as wd,
+    async_task::AsyncTask,
+    error::anyhow_error_to_cstring,
+    globals::SUPER_KEY,
+    legacy_blob::LegacyBlobLoader,
+    maintenance::DeleteListener,
+    maintenance::Domain,
+    utils::{watchdog as wd, AndroidUserId, AppUid},
 };
+use log::{error, warn};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::Arc;
 use std::{
@@ -101,7 +105,7 @@ impl DB {
         })
     }
 
-    fn list(&mut self, caller_uid: u32) -> Result<Vec<String>> {
+    fn list(&mut self, caller_uid: AppUid) -> Result<Vec<String>> {
         self.with_transaction(TransactionBehavior::Deferred, |tx| {
             let mut stmt = tx
                 .prepare("SELECT alias FROM profiles WHERE owner = ? ORDER BY alias ASC;")
@@ -114,31 +118,29 @@ impl DB {
             // See: https://github.com/rust-lang/rust-clippy/issues/8114
             #[allow(clippy::let_and_return)]
             let aliases = stmt
-                .query_map(params![caller_uid], |row| row.get(0))?
+                .query_map(params![caller_uid.0], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()
                 .context("In list: query_map failed.");
             aliases
         })
     }
 
-    fn put(&mut self, caller_uid: u32, alias: &str, entry: &[u8]) -> Result<()> {
-        ensure_keystore_put_is_enabled()?;
+    fn put(&mut self, caller_uid: AppUid, alias: &str, entry: &[u8]) -> Result<()> {
         self.with_transaction(TransactionBehavior::Immediate, |tx| {
             tx.execute(
                 "INSERT OR REPLACE INTO profiles (owner, alias, profile) values (?, ?, ?)",
-                params![caller_uid, alias, entry,],
+                params![caller_uid.0, alias, entry,],
             )
             .context("In put: Failed to insert or replace.")?;
             Ok(())
         })
     }
 
-    fn get(&mut self, caller_uid: u32, alias: &str) -> Result<Option<Vec<u8>>> {
-        ensure_keystore_get_is_enabled()?;
+    fn get(&mut self, caller_uid: AppUid, alias: &str) -> Result<Option<Vec<u8>>> {
         self.with_transaction(TransactionBehavior::Deferred, |tx| {
             tx.query_row(
                 "SELECT profile FROM profiles WHERE owner = ? AND alias = ?;",
-                params![caller_uid, alias],
+                params![caller_uid.0, alias],
                 |row| row.get(0),
             )
             .optional()
@@ -146,30 +148,30 @@ impl DB {
         })
     }
 
-    fn remove(&mut self, caller_uid: u32, alias: &str) -> Result<bool> {
+    fn remove(&mut self, caller_uid: AppUid, alias: &str) -> Result<bool> {
         let removed = self.with_transaction(TransactionBehavior::Immediate, |tx| {
             tx.execute(
                 "DELETE FROM profiles WHERE owner = ? AND alias = ?;",
-                params![caller_uid, alias],
+                params![caller_uid.0, alias],
             )
             .context("In remove: Failed to delete row.")
         })?;
         Ok(removed == 1)
     }
 
-    fn remove_uid(&mut self, uid: u32) -> Result<()> {
+    fn remove_uid(&mut self, uid: AppUid) -> Result<()> {
         self.with_transaction(TransactionBehavior::Immediate, |tx| {
-            tx.execute("DELETE FROM profiles WHERE owner = ?;", params![uid])
+            tx.execute("DELETE FROM profiles WHERE owner = ?;", params![uid.0])
                 .context("In remove_uid: Failed to delete.")
         })?;
         Ok(())
     }
 
-    fn remove_user(&mut self, user_id: u32) -> Result<()> {
+    fn remove_user(&mut self, user_id: AndroidUserId) -> Result<()> {
         self.with_transaction(TransactionBehavior::Immediate, |tx| {
             tx.execute(
                 "DELETE FROM profiles WHERE cast ( ( owner/? ) as int) = ?;",
-                params![rustutils::users::AID_USER_OFFSET, user_id],
+                params![rustutils::users::AID_USER_OFFSET, user_id.0],
             )
             .context("In remove_uid: Failed to delete.")
         })?;
@@ -224,7 +226,7 @@ fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
         Some(Error::Binder(_, _)) | None => (ERROR_SYSTEM_ERROR, true),
     };
     if log_error {
-        log::error!("{:?}", e);
+        error!("{e:?}");
     }
     BinderStatus::new_service_specific_error(rc, anyhow_error_to_cstring(&e).as_deref())
 }
@@ -259,8 +261,8 @@ impl DeleteListener for LegacyKeystoreDeleteListener {
     fn delete_namespace(&self, domain: Domain, namespace: i64) -> Result<()> {
         self.legacy_keystore.delete_namespace(domain, namespace)
     }
-    fn delete_user(&self, user_id: u32) -> Result<()> {
-        self.legacy_keystore.delete_user(user_id)
+    fn delete_user(&self, user: AndroidUserId) -> Result<()> {
+        self.legacy_keystore.delete_user(user)
     }
 }
 
@@ -271,7 +273,7 @@ pub struct LegacyKeystore {
 }
 
 struct AsyncState {
-    recently_imported: HashSet<(u32, String)>,
+    recently_imported: HashSet<(AppUid, String)>,
     legacy_loader: LegacyBlobLoader,
     db_path: PathBuf,
 }
@@ -282,7 +284,7 @@ impl LegacyKeystore {
     const LEGACY_KEYSTORE_FILE_NAME: &'static str = "vpnprofilestore.sqlite";
 
     const WIFI_NAMESPACE: i64 = 102;
-    const AID_WIFI: u32 = 1010;
+    const AID_WIFI: AppUid = AppUid(1010);
 
     /// Creates a new LegacyKeystore instance.
     pub fn new_native_binder(
@@ -304,12 +306,11 @@ impl LegacyKeystore {
         DB::new(&self.db_path).context("In open_db: Failed to open db.")
     }
 
-    fn get_effective_uid(uid: i32) -> Result<u32> {
-        const AID_SYSTEM: u32 = 1000;
-        let calling_uid = ThreadState::get_calling_uid();
-        let uid = uid as u32;
+    fn get_effective_uid(uid: AppUid) -> Result<AppUid> {
+        const AID_SYSTEM: AppUid = AppUid(1000);
+        let calling_uid = AppUid::calling();
 
-        if uid == UID_SELF as u32 || uid == calling_uid {
+        if uid.0 == UID_SELF as i64 || uid == calling_uid {
             Ok(calling_uid)
         } else if calling_uid == AID_SYSTEM && uid == Self::AID_WIFI {
             // The only exception for legacy reasons is allowing SYSTEM to access
@@ -319,12 +320,12 @@ impl LegacyKeystore {
             Ok(Self::AID_WIFI)
         } else {
             Err(Error::perm()).with_context(|| {
-                format!("In get_effective_uid: caller: {}, requested uid: {}.", calling_uid, uid)
+                format!("In get_effective_uid: caller: {calling_uid:?}, requested uid: {uid:?}")
             })
         }
     }
 
-    fn get(&self, alias: &str, uid: i32) -> Result<Vec<u8>> {
+    fn get(&self, alias: &str, uid: AppUid) -> Result<Vec<u8>> {
         ensure_keystore_get_is_enabled()?;
         let mut db = self.open_db().context("In get.")?;
         let uid = Self::get_effective_uid(uid).context("In get.")?;
@@ -343,7 +344,7 @@ impl LegacyKeystore {
         Err(Error::not_found()).context("In get: No such entry.")
     }
 
-    fn put(&self, alias: &str, uid: i32, entry: &[u8]) -> Result<()> {
+    fn put(&self, alias: &str, uid: AppUid, entry: &[u8]) -> Result<()> {
         ensure_keystore_put_is_enabled()?;
         let uid = Self::get_effective_uid(uid).context("In put.")?;
         let mut db = self.open_db().context("In put.")?;
@@ -353,7 +354,7 @@ impl LegacyKeystore {
         Ok(())
     }
 
-    fn remove(&self, alias: &str, uid: i32) -> Result<()> {
+    fn remove(&self, alias: &str, uid: AppUid) -> Result<()> {
         let uid = Self::get_effective_uid(uid).context("In remove.")?;
         let mut db = self.open_db().context("In remove.")?;
 
@@ -371,7 +372,7 @@ impl LegacyKeystore {
 
     fn delete_namespace(&self, domain: Domain, namespace: i64) -> Result<()> {
         let uid = match domain {
-            Domain::APP => namespace as u32,
+            Domain::APP => AppUid(namespace),
             Domain::SELINUX => {
                 if namespace == Self::WIFI_NAMESPACE {
                     // Namespace WIFI gets mapped to AID_WIFI.
@@ -385,21 +386,21 @@ impl LegacyKeystore {
         };
 
         if let Err(e) = self.bulk_delete_uid(uid) {
-            log::warn!("In LegacyKeystore::delete_namespace: {:?}", e);
+            warn!("In LegacyKeystore::delete_namespace: {e:?}");
         }
         let mut db = self.open_db().context("In LegacyKeystore::delete_namespace.")?;
         db.remove_uid(uid).context("In LegacyKeystore::delete_namespace.")
     }
 
-    fn delete_user(&self, user_id: u32) -> Result<()> {
-        if let Err(e) = self.bulk_delete_user(user_id) {
-            log::warn!("In LegacyKeystore::delete_user: {:?}", e);
+    fn delete_user(&self, user: AndroidUserId) -> Result<()> {
+        if let Err(e) = self.bulk_delete_user(user) {
+            warn!("In LegacyKeystore::delete_user({user:?}): {e:?}");
         }
         let mut db = self.open_db().context("In LegacyKeystore::delete_user.")?;
-        db.remove_user(user_id).context("In LegacyKeystore::delete_user.")
+        db.remove_user(user).context("In LegacyKeystore::delete_user({user:?})")
     }
 
-    fn list(&self, prefix: &str, uid: i32) -> Result<Vec<String>> {
+    fn list(&self, prefix: &str, uid: AppUid) -> Result<Vec<String>> {
         let mut db = self.open_db().context("In list.")?;
         let uid = Self::get_effective_uid(uid).context("In list.")?;
         let mut result = self.list_legacy(uid).context("In list.")?;
@@ -432,7 +433,7 @@ impl LegacyKeystore {
         receiver.recv().context("In do_serialized: Failed to receive result.")?
     }
 
-    fn list_legacy(&self, uid: u32) -> Result<Vec<String>> {
+    fn list_legacy(&self, uid: AppUid) -> Result<Vec<String>> {
         self.do_serialized(move |state| {
             state
                 .legacy_loader
@@ -442,7 +443,7 @@ impl LegacyKeystore {
         .context("In list_legacy.")
     }
 
-    fn get_legacy(&self, uid: u32, alias: &str) -> Result<bool> {
+    fn get_legacy(&self, uid: AppUid, alias: &str) -> Result<bool> {
         let alias = alias.to_string();
         self.do_serialized(move |state| {
             if state.recently_imported.contains(&(uid, alias.clone())) {
@@ -460,7 +461,7 @@ impl LegacyKeystore {
         .context("In get_legacy.")
     }
 
-    fn remove_legacy(&self, uid: u32, alias: &str) -> Result<bool> {
+    fn remove_legacy(&self, uid: AppUid, alias: &str) -> Result<bool> {
         let alias = alias.to_string();
         self.do_serialized(move |state| {
             if state.recently_imported.contains(&(uid, alias.clone())) {
@@ -473,7 +474,7 @@ impl LegacyKeystore {
         })
     }
 
-    fn bulk_delete_uid(&self, uid: u32) -> Result<()> {
+    fn bulk_delete_uid(&self, uid: AppUid) -> Result<()> {
         self.do_serialized(move |state| {
             let entries = state
                 .legacy_loader
@@ -481,23 +482,23 @@ impl LegacyKeystore {
                 .context("In bulk_delete_uid: Trying to list entries.")?;
             for alias in entries.iter() {
                 if let Err(e) = state.legacy_loader.remove_legacy_keystore_entry(uid, alias) {
-                    log::warn!("In bulk_delete_uid: Failed to delete legacy entry. {:?}", e);
+                    warn!("In bulk_delete_uid: Failed to delete legacy entry. {e:?}");
                 }
             }
             Ok(())
         })
     }
 
-    fn bulk_delete_user(&self, user_id: u32) -> Result<()> {
+    fn bulk_delete_user(&self, user: AndroidUserId) -> Result<()> {
         self.do_serialized(move |state| {
             let entries = state
                 .legacy_loader
-                .list_legacy_keystore_entries_for_user(user_id)
+                .list_legacy_keystore_entries_for_user(user)
                 .context("In bulk_delete_user: Trying to list entries.")?;
             for (uid, entries) in entries.iter() {
                 for alias in entries.iter() {
                     if let Err(e) = state.legacy_loader.remove_legacy_keystore_entry(*uid, alias) {
-                        log::warn!("In bulk_delete_user: Failed to delete legacy entry. {:?}", e);
+                        warn!("In bulk_delete_user: Failed to delete legacy entry. {e:?}");
                     }
                 }
             }
@@ -506,7 +507,7 @@ impl LegacyKeystore {
     }
 
     fn import_one_legacy_entry(
-        uid: u32,
+        uid: AppUid,
         alias: &str,
         legacy_loader: &LegacyBlobLoader,
         db: &mut DB,
@@ -516,7 +517,7 @@ impl LegacyKeystore {
                 if let Some(key) = SUPER_KEY
                     .read()
                     .unwrap()
-                    .get_after_first_unlock_key_by_user_id(uid_to_android_user(uid))
+                    .get_credential_encrypted_key_by_user_id(uid.owning_user())
                 {
                     key.decrypt(ciphertext, iv, tag)
                 } else {
@@ -545,18 +546,22 @@ impl binder::Interface for LegacyKeystoreService {}
 
 impl ILegacyKeystore for LegacyKeystoreService {
     fn get(&self, alias: &str, uid: i32) -> BinderResult<Vec<u8>> {
+        let uid = AppUid(uid as i64);
         let _wp = wd::watch("ILegacyKeystore::get");
         self.legacy_keystore.get(alias, uid).map_err(into_logged_binder)
     }
     fn put(&self, alias: &str, uid: i32, entry: &[u8]) -> BinderResult<()> {
+        let uid = AppUid(uid as i64);
         let _wp = wd::watch("ILegacyKeystore::put");
         self.legacy_keystore.put(alias, uid, entry).map_err(into_logged_binder)
     }
     fn remove(&self, alias: &str, uid: i32) -> BinderResult<()> {
+        let uid = AppUid(uid as i64);
         let _wp = wd::watch("ILegacyKeystore::remove");
         self.legacy_keystore.remove(alias, uid).map_err(into_logged_binder)
     }
     fn list(&self, prefix: &str, uid: i32) -> BinderResult<Vec<String>> {
+        let uid = AppUid(uid as i64);
         let _wp = wd::watch("ILegacyKeystore::list");
         self.legacy_keystore.list(prefix, uid).map_err(into_logged_binder)
     }
@@ -584,40 +589,55 @@ mod db_test {
             .expect("Failed to open database.");
 
         // Insert three entries for owner 2.
-        db.put(2, "test1", TEST_BLOB1).expect("Failed to insert test1.");
-        db.put(2, "test2", TEST_BLOB2).expect("Failed to insert test2.");
-        db.put(2, "test3", TEST_BLOB3).expect("Failed to insert test3.");
+        db.put(AppUid(2), "test1", TEST_BLOB1).expect("Failed to insert test1.");
+        db.put(AppUid(2), "test2", TEST_BLOB2).expect("Failed to insert test2.");
+        db.put(AppUid(2), "test3", TEST_BLOB3).expect("Failed to insert test3.");
 
         // Check list returns all inserted aliases.
         assert_eq!(
             vec!["test1".to_string(), "test2".to_string(), "test3".to_string(),],
-            db.list(2).expect("Failed to list entries.")
+            db.list(AppUid(2)).expect("Failed to list entries.")
         );
 
         // There should be no entries for owner 1.
-        assert_eq!(Vec::<String>::new(), db.list(1).expect("Failed to list entries."));
+        assert_eq!(Vec::<String>::new(), db.list(AppUid(1)).expect("Failed to list entries."));
 
         // Check the content of the three entries.
-        assert_eq!(Some(TEST_BLOB1), db.get(2, "test1").expect("Failed to get entry.").as_deref());
-        assert_eq!(Some(TEST_BLOB2), db.get(2, "test2").expect("Failed to get entry.").as_deref());
-        assert_eq!(Some(TEST_BLOB3), db.get(2, "test3").expect("Failed to get entry.").as_deref());
+        assert_eq!(
+            Some(TEST_BLOB1),
+            db.get(AppUid(2), "test1").expect("Failed to get entry.").as_deref()
+        );
+        assert_eq!(
+            Some(TEST_BLOB2),
+            db.get(AppUid(2), "test2").expect("Failed to get entry.").as_deref()
+        );
+        assert_eq!(
+            Some(TEST_BLOB3),
+            db.get(AppUid(2), "test3").expect("Failed to get entry.").as_deref()
+        );
 
         // Remove test2 and check and check that it is no longer retrievable.
-        assert!(db.remove(2, "test2").expect("Failed to remove entry."));
-        assert!(db.get(2, "test2").expect("Failed to get entry.").is_none());
+        assert!(db.remove(AppUid(2), "test2").expect("Failed to remove entry."));
+        assert!(db.get(AppUid(2), "test2").expect("Failed to get entry.").is_none());
 
         // test2 should now no longer be in the list.
         assert_eq!(
             vec!["test1".to_string(), "test3".to_string(),],
-            db.list(2).expect("Failed to list entries.")
+            db.list(AppUid(2)).expect("Failed to list entries.")
         );
 
         // Put on existing alias replaces it.
         // Verify test1 is TEST_BLOB1.
-        assert_eq!(Some(TEST_BLOB1), db.get(2, "test1").expect("Failed to get entry.").as_deref());
-        db.put(2, "test1", TEST_BLOB4).expect("Failed to replace test1.");
+        assert_eq!(
+            Some(TEST_BLOB1),
+            db.get(AppUid(2), "test1").expect("Failed to get entry.").as_deref()
+        );
+        db.put(AppUid(2), "test1", TEST_BLOB4).expect("Failed to replace test1.");
         // Verify test1 is TEST_BLOB4.
-        assert_eq!(Some(TEST_BLOB4), db.get(2, "test1").expect("Failed to get entry.").as_deref());
+        assert_eq!(
+            Some(TEST_BLOB4),
+            db.get(AppUid(2), "test1").expect("Failed to get entry.").as_deref()
+        );
     }
 
     #[test]
@@ -627,15 +647,18 @@ mod db_test {
             .expect("Failed to open database.");
 
         // Insert three entries for owner 2.
-        db.put(2, "test1", TEST_BLOB1).expect("Failed to insert test1.");
-        db.put(2, "test2", TEST_BLOB2).expect("Failed to insert test2.");
-        db.put(3, "test3", TEST_BLOB3).expect("Failed to insert test3.");
+        db.put(AppUid(2), "test1", TEST_BLOB1).expect("Failed to insert test1.");
+        db.put(AppUid(2), "test2", TEST_BLOB2).expect("Failed to insert test2.");
+        db.put(AppUid(3), "test3", TEST_BLOB3).expect("Failed to insert test3.");
 
-        db.remove_uid(2).expect("Failed to remove uid 2");
+        db.remove_uid(AppUid(2)).expect("Failed to remove uid 2");
 
-        assert_eq!(Vec::<String>::new(), db.list(2).expect("Failed to list entries."));
+        assert_eq!(Vec::<String>::new(), db.list(AppUid(2)).expect("Failed to list entries."));
 
-        assert_eq!(vec!["test3".to_string(),], db.list(3).expect("Failed to list entries."));
+        assert_eq!(
+            vec!["test3".to_string(),],
+            db.list(AppUid(3)).expect("Failed to list entries.")
+        );
     }
 
     #[test]
@@ -645,25 +668,30 @@ mod db_test {
             .expect("Failed to open database.");
 
         // Insert three entries for owner 2.
-        db.put(2 + 2 * rustutils::users::AID_USER_OFFSET, "test1", TEST_BLOB1)
+        db.put(AppUid(2 + 2 * rustutils::users::AID_USER_OFFSET as i64), "test1", TEST_BLOB1)
             .expect("Failed to insert test1.");
-        db.put(4 + 2 * rustutils::users::AID_USER_OFFSET, "test2", TEST_BLOB2)
+        db.put(AppUid(4 + 2 * rustutils::users::AID_USER_OFFSET as i64), "test2", TEST_BLOB2)
             .expect("Failed to insert test2.");
-        db.put(3, "test3", TEST_BLOB3).expect("Failed to insert test3.");
+        db.put(AppUid(3), "test3", TEST_BLOB3).expect("Failed to insert test3.");
 
-        db.remove_user(2).expect("Failed to remove user 2");
+        db.remove_user(AndroidUserId(2)).expect("Failed to remove user 2");
 
         assert_eq!(
             Vec::<String>::new(),
-            db.list(2 + 2 * rustutils::users::AID_USER_OFFSET).expect("Failed to list entries.")
+            db.list(AppUid(2 + 2 * rustutils::users::AID_USER_OFFSET as i64))
+                .expect("Failed to list entries.")
         );
 
         assert_eq!(
             Vec::<String>::new(),
-            db.list(4 + 2 * rustutils::users::AID_USER_OFFSET).expect("Failed to list entries.")
+            db.list(AppUid(4 + 2 * rustutils::users::AID_USER_OFFSET as i64))
+                .expect("Failed to list entries.")
         );
 
-        assert_eq!(vec!["test3".to_string(),], db.list(3).expect("Failed to list entries."));
+        assert_eq!(
+            vec!["test3".to_string(),],
+            db.list(AppUid(3)).expect("Failed to list entries.")
+        );
     }
 
     #[test]
@@ -688,8 +716,8 @@ mod db_test {
                 actual_entry_count = count;
                 break;
             }
-            let alias = format!("test_alias_{}", count);
-            db.put(1, &alias, TEST_BLOB1).expect("Failed to add entry (1).");
+            let alias = format!("test_alias_{count}");
+            db.put(AppUid(1), &alias, TEST_BLOB1).expect("Failed to add entry (1).");
         }
 
         // Insert more keys from a different thread and into a different namespace.
@@ -701,8 +729,8 @@ mod db_test {
                 if Instant::now().duration_since(test_begin) >= Duration::from_secs(40) {
                     return;
                 }
-                let alias = format!("test_alias_{}", count);
-                db.put(2, &alias, TEST_BLOB2).expect("Failed to add entry (2).");
+                let alias = format!("test_alias_{count}");
+                db.put(AppUid(2), &alias, TEST_BLOB2).expect("Failed to add entry (2).");
             }
 
             // Then delete them again.
@@ -710,8 +738,8 @@ mod db_test {
                 if Instant::now().duration_since(test_begin) >= Duration::from_secs(40) {
                     return;
                 }
-                let alias = format!("test_alias_{}", count);
-                db.remove(2, &alias).expect("Remove Failed (2).");
+                let alias = format!("test_alias_{count}");
+                db.remove(AppUid(2), &alias).expect("Remove Failed (2).");
             }
         });
 
@@ -724,8 +752,8 @@ mod db_test {
                 if Instant::now().duration_since(test_begin) >= Duration::from_secs(40) {
                     return;
                 }
-                let alias = format!("test_alias_{}", count);
-                db.remove(1, &alias).expect("Remove Failed (1)).");
+                let alias = format!("test_alias_{count}");
+                db.remove(AppUid(1), &alias).expect("Remove Failed (1)).");
             }
         });
 
@@ -739,9 +767,9 @@ mod db_test {
                 }
                 let mut db = DB::new(&db_path3).expect("Failed to open database.");
 
-                db.put(3, TEST_ALIAS, TEST_BLOB3).expect("Failed to add entry (3).");
+                db.put(AppUid(3), TEST_ALIAS, TEST_BLOB3).expect("Failed to add entry (3).");
 
-                db.remove(3, TEST_ALIAS).expect("Remove failed (3).");
+                db.remove(AppUid(3), TEST_ALIAS).expect("Remove failed (3).");
             }
         });
 
@@ -755,7 +783,7 @@ mod db_test {
                 let mut db = DB::new(&db_path).expect("Failed to open database.");
 
                 // This may return Some or None but it must not fail.
-                db.get(3, TEST_ALIAS).expect("Failed to get entry (4).");
+                db.get(AppUid(3), TEST_ALIAS).expect("Failed to get entry (4).");
             }
         });
 

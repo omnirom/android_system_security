@@ -998,11 +998,6 @@ fn keystore2_gen_key_auth_serial_number_subject_test_success() {
 
 #[test]
 fn test_supplementary_attestation_info() {
-    if !keystore2_flags::attest_modules() {
-        // Module info is only populated if the flag is set.
-        return;
-    }
-
     // Test should not run before MODULE_HASH supplementary info is populated.
     assert!(rustutils::system_properties::read_bool("keystore.module_hash.sent", false)
         .unwrap_or(false));

@@ -513,8 +513,7 @@ pub fn check_key_authorizations(
         if ALLOWED_TAGS_IN_KEY_AUTHS.contains(&key_param.tag) {
             assert!(
                 check_key_param(authorizations, key_param),
-                "Key parameter not found: {:#?}",
-                key_param
+                "Key parameter not found: {key_param:#?}"
             );
         }
         true
@@ -1449,7 +1448,7 @@ pub fn import_aes_keys(
     // Import Total number of keys with given alias prefix.
     for count in total_count {
         let mut alias = String::new();
-        write!(alias, "{}_{}", alias_prefix, count).unwrap();
+        write!(alias, "{alias_prefix}_{count}").unwrap();
         imported_key_aliases.insert(alias.clone());
 
         import_aes_key(sl, Domain::APP, -1, Some(alias))?;

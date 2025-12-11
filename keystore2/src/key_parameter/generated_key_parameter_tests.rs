@@ -46,7 +46,7 @@ fn get_field_by_tag_type(tag: Tag) -> KmKeyParameterValue {
         TagType::BIGNUM | TagType::BYTES => return KmKeyParameterValue::Blob(Default::default()),
         _ => {}
     }
-    panic!("Unknown tag/tag_type: {:?} {:?}", tag, tag_type);
+    panic!("Unknown tag/tag_type: {tag:?} {tag_type:?}");
 }
 
 fn check_field_matches_tag_type(list_o_parameters: &[KmKeyParameter]) {

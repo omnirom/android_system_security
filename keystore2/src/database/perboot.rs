@@ -16,6 +16,7 @@
 //! for the main Keystore 2.0 database module.
 
 use super::AuthTokenEntry;
+use crate::utils::SecureUserId;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     HardwareAuthToken::HardwareAuthToken, HardwareAuthenticatorType::HardwareAuthenticatorType,
 };
@@ -26,16 +27,16 @@ use std::sync::RwLock;
 
 #[derive(PartialEq, PartialOrd, Ord, Eq, Hash)]
 struct AuthTokenId {
-    user_id: i64,
-    auth_id: i64,
+    user_id: SecureUserId,
+    auth_id: SecureUserId,
     authenticator_type: HardwareAuthenticatorType,
 }
 
 impl AuthTokenId {
     fn from_auth_token(tok: &HardwareAuthToken) -> Self {
         AuthTokenId {
-            user_id: tok.userId,
-            auth_id: tok.authenticatorId,
+            user_id: SecureUserId(tok.userId),
+            auth_id: SecureUserId(tok.authenticatorId),
             authenticator_type: tok.authenticatorType,
         }
     }

@@ -23,7 +23,7 @@ use crate::permission::{KeyPerm, KeystorePerm};
 use crate::security_level::KeystoreSecurityLevel;
 use crate::utils::{
     check_grant_permission, check_key_permission, check_keystore_permission, count_key_entries,
-    key_parameters_to_authorizations, list_key_entries, uid_to_android_user, watchdog as wd,
+    key_parameters_to_authorizations, list_key_entries, watchdog as wd, AppUid,
 };
 use crate::{
     database::Uuid,
@@ -52,6 +52,7 @@ use android_system_keystore2::aidl::android::system::keystore2::{
 use anyhow::{Context, Result};
 use error::Error;
 use keystore2_selinux as selinux;
+use log::error;
 
 /// Implementation of the IKeystoreService.
 #[derive(Default)]
@@ -72,8 +73,8 @@ impl KeystoreService {
         ) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to construct mandatory security level TEE: {e:?}");
-                log::error!("Does the device have a /default Keymaster or KeyMint instance?");
+                error!("Failed to construct mandatory security level TEE: {e:?}");
+                error!("Does the device have a /default Keymaster or KeyMint instance?");
                 return Err(e.context(ks_err!("Trying to construct mandatory security level TEE")));
             }
         };
@@ -135,12 +136,12 @@ impl KeystoreService {
     }
 
     fn get_key_entry(&self, key: &KeyDescriptor) -> Result<KeyEntryResponse> {
-        let caller_uid = ThreadState::get_calling_uid();
+        let caller_uid = AppUid::calling();
 
         let super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(uid_to_android_user(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         let (key_id_guard, mut key_entry) = DB
             .with(|db| {
@@ -193,11 +194,11 @@ impl KeystoreService {
         public_cert: Option<&[u8]>,
         certificate_chain: Option<&[u8]>,
     ) -> Result<()> {
-        let caller_uid = ThreadState::get_calling_uid();
+        let caller_uid = AppUid::calling();
         let super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(uid_to_android_user(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         DB.with::<_, Result<()>>(|db| {
             let entry = match LEGACY_IMPORTER.with_try_import(key, caller_uid, super_key, || {
@@ -343,11 +344,11 @@ impl KeystoreService {
     }
 
     fn delete_key(&self, key: &KeyDescriptor) -> Result<()> {
-        let caller_uid = ThreadState::get_calling_uid();
+        let caller_uid = AppUid::calling();
         let super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(uid_to_android_user(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         DB.with(|db| {
             LEGACY_IMPORTER.with_try_import(key, caller_uid, super_key, || {
@@ -364,32 +365,28 @@ impl KeystoreService {
     fn grant(
         &self,
         key: &KeyDescriptor,
-        grantee_uid: i32,
+        grantee_uid: AppUid,
         access_vector: permission::KeyPermSet,
     ) -> Result<KeyDescriptor> {
-        let caller_uid = ThreadState::get_calling_uid();
+        let caller_uid = AppUid::calling();
         let super_key = SUPER_KEY
             .read()
             .unwrap()
-            .get_after_first_unlock_key_by_user_id(uid_to_android_user(caller_uid));
+            .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
 
         DB.with(|db| {
             LEGACY_IMPORTER.with_try_import(key, caller_uid, super_key, || {
-                db.borrow_mut().grant(
-                    key,
-                    caller_uid,
-                    grantee_uid as u32,
-                    access_vector,
-                    |k, av| check_grant_permission(*av, k).context("During grant."),
-                )
+                db.borrow_mut().grant(key, caller_uid, grantee_uid, access_vector, |k, av| {
+                    check_grant_permission(*av, k).context("During grant.")
+                })
             })
         })
         .context(ks_err!("KeystoreService::grant."))
     }
 
-    fn ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> Result<()> {
+    fn ungrant(&self, key: &KeyDescriptor, grantee_uid: AppUid) -> Result<()> {
         DB.with(|db| {
-            db.borrow_mut().ungrant(key, ThreadState::get_calling_uid(), grantee_uid as u32, |k| {
+            db.borrow_mut().ungrant(key, AppUid::calling(), grantee_uid, |k| {
                 check_key_permission(KeyPerm::Grant, k, &None)
             })
         })
@@ -438,10 +435,12 @@ impl IKeystoreService for KeystoreService {
         grantee_uid: i32,
         access_vector: i32,
     ) -> binder::Result<KeyDescriptor> {
+        let grantee_uid = AppUid(grantee_uid as i64);
         let _wp = wd::watch("IKeystoreService::grant");
         self.grant(key, grantee_uid, access_vector.into()).map_err(into_logged_binder)
     }
     fn ungrant(&self, key: &KeyDescriptor, grantee_uid: i32) -> binder::Result<()> {
+        let grantee_uid = AppUid(grantee_uid as i64);
         let _wp = wd::watch("IKeystoreService::ungrant");
         self.ungrant(key, grantee_uid).map_err(into_logged_binder)
     }
@@ -461,12 +460,7 @@ impl IKeystoreService for KeystoreService {
     }
 
     fn getSupplementaryAttestationInfo(&self, tag: Tag) -> binder::Result<Vec<u8>> {
-        if keystore2_flags::attest_modules() {
-            let _wp = wd::watch("IKeystoreService::getSupplementaryAttestationInfo");
-            self.get_supplementary_attestation_info(tag).map_err(into_logged_binder)
-        } else {
-            log::error!("attest_modules flag is not toggled");
-            Err(binder::StatusCode::UNKNOWN_TRANSACTION.into())
-        }
+        let _wp = wd::watch("IKeystoreService::getSupplementaryAttestationInfo");
+        self.get_supplementary_attestation_info(tag).map_err(into_logged_binder)
     }
 }

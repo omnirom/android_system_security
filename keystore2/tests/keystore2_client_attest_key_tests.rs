@@ -66,7 +66,7 @@ fn keystore2_attest_rsa_signing_key_success() {
             &sl,
             Domain::APP,
             -1,
-            Some(sign_key_alias),
+            Some(sign_key_alias.clone()),
             &key_generations::KeyParams {
                 key_size: 2048,
                 purpose: vec![KeyPurpose::SIGN, KeyPurpose::VERIFY],
@@ -87,6 +87,8 @@ fn keystore2_attest_rsa_signing_key_success() {
         cert_chain.extend(attestation_key_metadata.certificate.as_ref().unwrap());
         cert_chain.extend(attestation_key_metadata.certificateChain.as_ref().unwrap());
         validate_certchain(&cert_chain).expect("Error while validating cert chain");
+        sl.keystore2.deleteKey(&attestation_key_metadata.key).unwrap();
+        sl.keystore2.deleteKey(&sign_key_metadata.key).unwrap();
     }
 }
 
@@ -141,6 +143,8 @@ fn keystore2_attest_rsa_encrypt_key_success() {
         cert_chain.extend(attestation_key_metadata.certificateChain.as_ref().unwrap());
 
         validate_certchain(&cert_chain).expect("Error while validating cert chain.");
+        sl.keystore2.deleteKey(&attestation_key_metadata.key).unwrap();
+        sl.keystore2.deleteKey(&decrypt_key_metadata.key).unwrap();
     }
 }
 
@@ -183,6 +187,8 @@ fn keystore2_attest_ec_key_success() {
         cert_chain.extend(attestation_key_metadata.certificateChain.as_ref().unwrap());
 
         validate_certchain(&cert_chain).expect("Error while validating cert chain.");
+        sl.keystore2.deleteKey(&attestation_key_metadata.key).unwrap();
+        sl.keystore2.deleteKey(&ec_key_metadata.key).unwrap();
     }
 }
 
@@ -248,6 +254,8 @@ fn keystore2_attest_rsa_signing_key_with_ec_25519_key_success() {
     cert_chain.extend(attestation_key_metadata.certificate.as_ref().unwrap());
     cert_chain.extend(attestation_key_metadata.certificateChain.as_ref().unwrap());
     validate_certchain(&cert_chain).expect("Error while validating cert chain");
+    sl.keystore2.deleteKey(&attestation_key_metadata.key).unwrap();
+    sl.keystore2.deleteKey(&sign_key_metadata.key).unwrap();
 }
 
 /// Try to generate RSA attestation key with multiple purposes. Test should fail with error code
@@ -380,6 +388,7 @@ fn keystore2_attest_key_fails_missing_challenge() {
         },
         Some(&attestation_key_metadata.key),
     ));
+    sl.keystore2.deleteKey(&attestation_key_metadata.key).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::ATTESTATION_CHALLENGE_MISSING), result.unwrap_err());
 }
@@ -417,6 +426,7 @@ fn keystore2_attest_rsa_key_with_non_attest_key_fails_incompat_purpose_error() {
         },
         Some(&non_attest_key_metadata.key),
     ));
+    sl.keystore2.deleteKey(&non_attest_key_metadata.key).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
 }
@@ -460,6 +470,7 @@ fn keystore2_attest_rsa_key_with_symmetric_key_fails_sys_error() {
         },
         Some(&sym_key_metadata.key),
     ));
+    sl.keystore2.deleteKey(&sym_key_metadata.key).unwrap();
     assert!(result.is_err());
     assert_eq!(Error::Rc(ResponseCode::INVALID_ARGUMENT), result.unwrap_err());
 }
@@ -544,8 +555,10 @@ fn generate_attested_key_with_device_attest_ids(algorithm: Algorithm) {
             SecurityLevel::TRUSTED_ENVIRONMENT,
         )
         .expect("Attest id verification failed.");
+        sl.keystore2.deleteKey(&key_metadata.key).unwrap();
         assert_eq!(attest_id_value, value);
     }
+    sl.keystore2.deleteKey(&attest_key_metadata.key).unwrap();
 }
 
 #[test]
@@ -595,7 +608,7 @@ fn keystore2_attest_key_fails_with_invalid_attestation_id() {
         let result = key_generations::map_ks_error(key_generations::generate_key_with_attest_id(
             &sl,
             Algorithm::EC,
-            Some(ec_key_alias),
+            Some(ec_key_alias.clone()),
             att_challenge,
             &attest_key_metadata.key,
             attest_id,
@@ -605,6 +618,7 @@ fn keystore2_attest_key_fails_with_invalid_attestation_id() {
         assert!(result.is_err());
         device_id_attestation_check_acceptable_error(attest_id, result.unwrap_err());
     }
+    sl.keystore2.deleteKey(&attest_key_metadata.key).unwrap();
 }
 
 ///  If `DEVICE_ID_ATTESTATION_FEATURE` is not supported then test tries to generate an attested
@@ -636,7 +650,7 @@ fn keystore2_attest_key_without_attestation_id_support_fails_with_cannot_attest_
         let result = key_generations::map_ks_error(key_generations::generate_key_with_attest_id(
             &sl,
             Algorithm::RSA,
-            Some(key_alias),
+            Some(key_alias.clone()),
             att_challenge,
             &attest_key_metadata.key,
             attest_id,
@@ -648,6 +662,7 @@ fn keystore2_attest_key_without_attestation_id_support_fails_with_cannot_attest_
         );
         assert_eq!(result.unwrap_err(), Error::Km(ErrorCode::CANNOT_ATTEST_IDS));
     }
+    sl.keystore2.deleteKey(&attest_key_metadata.key).unwrap();
 }
 
 /// Try to generate an attestation key from user context with UID other than AID_SYSTEM or AID_ROOT

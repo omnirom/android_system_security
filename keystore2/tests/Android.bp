@@ -28,12 +28,6 @@ rust_test {
         "keymint_use_latest_hal_aidl_rust",
         "keystore2_use_latest_aidl_rust",
     ],
-    static_libs: [
-        // Also include static_libs for the NDK variants so that they are available
-        // for dependencies.
-        "android.system.keystore2-V5-ndk",
-        "android.hardware.security.keymint-V4-ndk",
-    ],
     srcs: ["keystore2_client_tests.rs"],
     test_suites: [
         "automotive-sdv-tests",

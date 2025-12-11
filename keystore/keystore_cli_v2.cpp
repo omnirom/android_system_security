@@ -701,7 +701,6 @@ int BrilloPlatformTest(const std::string& prefix, bool test_for_0_3) {
                "This does not meet Brillo requirements.\n",
                kBoldYellowWarning);
     }
-    int test_count = 0;
     int fail_count = 0;
     std::vector<TestCase> test_cases = GetTestCases();
     for (const auto& test_case : test_cases) {
@@ -714,7 +713,6 @@ int BrilloPlatformTest(const std::string& prefix, bool test_for_0_3) {
              android::base::StartsWith(test_case.name, "HMAC"))) {
             continue;
         }
-        ++test_count;
         if (!TestKey(test_case.name, test_case.required_for_brillo_pts,
                      test_case.parameters.vector_data())) {
             VLOG(1) << "Test failed: " << test_case.name;

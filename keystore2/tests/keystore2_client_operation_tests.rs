@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    create_signing_operation, execute_op_run_as_child, perform_sample_sign_operation,
-    BarrierReached, ForcedOp, TestOutcome,
+    create_signing_operation, delete_app_key, delete_key, execute_op_run_as_child,
+    perform_sample_sign_operation, BarrierReached, ForcedOp, TestOutcome,
 };
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Digest::Digest, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
@@ -154,9 +154,11 @@ fn keystore2_forced_op_after_backendbusy_test() {
             Digest::SHA_2_256,
             Domain::SELINUX,
             100,
-            Some(alias),
+            Some(alias.clone()),
         )
         .expect("Client failed to create forced operation after BACKEND_BUSY state.");
+        let sl = SecLevel::tee();
+        delete_key(&sl.keystore2, Domain::SELINUX, 100, Some(alias), None).unwrap();
     };
 
     // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
@@ -285,7 +287,7 @@ fn keystore2_max_forced_ops_test() {
 /// 3. Sequentially try to use above created `n` number of operations and also add a new operation,
 ///    so that it should trigger cannibalizing one of their own sibling operations.
 ///    3.1 While trying to use these pruned operations an `INVALID_OPERATION_HANDLE` error is
-///        expected as they are already pruned.
+///    expected as they are already pruned.
 /// 4. Notify the child process to resume and complete the operation. It is expected to complete the
 ///    operation successfully.
 /// 5. Try to use the latest operation of parent. It is expected to complete the operation
@@ -385,6 +387,7 @@ fn keystore2_ops_prune_test() {
         }
         _ => panic!("Operation should have created successfully."),
     }
+    sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Try to create forced operations with various contexts -
@@ -412,10 +415,13 @@ fn keystore2_forced_op_perm_denied_test() {
                 Digest::SHA_2_256,
                 Domain::APP,
                 -1,
-                Some(alias),
+                Some(alias.clone()),
             ));
             assert!(result.is_err());
             assert_eq!(Error::Rc(ResponseCode::PERMISSION_DENIED), result.unwrap_err());
+
+            let sl = SecLevel::tee();
+            delete_app_key(&sl.keystore2, &alias).unwrap();
         };
 
         // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
@@ -444,9 +450,18 @@ fn keystore2_forced_op_success_test() {
             Digest::SHA_2_256,
             Domain::SELINUX,
             key_generations::SELINUX_VOLD_NAMESPACE,
-            Some(alias),
+            Some(alias.clone()),
         )
         .expect("Client with vold context failed to create forced operation.");
+        let sl = SecLevel::tee();
+        delete_key(
+            &sl.keystore2,
+            Domain::SELINUX,
+            key_generations::SELINUX_VOLD_NAMESPACE,
+            Some(alias),
+            None,
+        )
+        .unwrap();
     };
 
     // Safety: only one thread at this point (enforced by `AndroidTest.xml` setting
@@ -461,13 +476,14 @@ fn keystore2_forced_op_success_test() {
 /// when multiple threads try to access the operation handle at same time.
 #[test]
 fn keystore2_op_fails_operation_busy() {
+    let alias = "op_busy_alias_test_key";
     let op_response = create_signing_operation(
         ForcedOp(false),
         KeyPurpose::SIGN,
         Digest::SHA_2_256,
         Domain::APP,
         -1,
-        Some("op_busy_alias_test_key".to_string()),
+        Some(alias.to_string()),
     )
     .unwrap();
 
@@ -480,6 +496,9 @@ fn keystore2_op_fails_operation_busy() {
     let result2 = th_handle_2.join().unwrap();
 
     assert!(result1 || result2);
+
+    let sl = SecLevel::tee();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Create an operation and use it for performing sign operation. After completing the operation
@@ -487,13 +506,14 @@ fn keystore2_op_fails_operation_busy() {
 /// code `INVALID_OPERATION_HANDLE`.
 #[test]
 fn keystore2_abort_finalized_op_fail_test() {
+    let alias = "ks_op_abort_fail_test_key";
     let op_response = create_signing_operation(
         ForcedOp(false),
         KeyPurpose::SIGN,
         Digest::SHA_2_256,
         Domain::APP,
         -1,
-        Some("ks_op_abort_fail_test_key".to_string()),
+        Some(alias.to_string()),
     )
     .unwrap();
 
@@ -502,6 +522,9 @@ fn keystore2_abort_finalized_op_fail_test() {
     let result = key_generations::map_ks_error(op.abort());
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE), result.unwrap_err());
+
+    let sl = SecLevel::tee();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Create an operation and use it for performing sign operation. Before finishing the operation
@@ -510,13 +533,14 @@ fn keystore2_abort_finalized_op_fail_test() {
 /// code `INVALID_OPERATION_HANDLE`.
 #[test]
 fn keystore2_op_abort_success_test() {
+    let alias = "ks_op_abort_success_key";
     let op_response = create_signing_operation(
         ForcedOp(false),
         KeyPurpose::SIGN,
         Digest::SHA_2_256,
         Domain::APP,
         -1,
-        Some("ks_op_abort_success_key".to_string()),
+        Some(alias.to_string()),
     )
     .unwrap();
 
@@ -529,6 +553,9 @@ fn keystore2_op_abort_success_test() {
     let result = key_generations::map_ks_error(op.finish(None, None));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE), result.unwrap_err());
+
+    let sl = SecLevel::tee();
+    delete_app_key(&sl.keystore2, alias).unwrap();
 }
 
 /// Executes an operation in a thread. Performs an `update` operation repeatedly till the user
@@ -561,13 +588,14 @@ fn perform_abort_op_busy_in_thread(
 #[test]
 fn keystore2_op_abort_fails_with_operation_busy_error_test() {
     loop {
+        let alias = "op_abort_busy_alias_test_key";
         let op_response = create_signing_operation(
             ForcedOp(false),
             KeyPurpose::SIGN,
             Digest::SHA_2_256,
             Domain::APP,
             -1,
-            Some("op_abort_busy_alias_test_key".to_string()),
+            Some(alias.to_string()),
         )
         .unwrap();
         let op: binder::Strong<dyn IKeystoreOperation> = op_response.iOperation.unwrap();
@@ -596,5 +624,8 @@ fn keystore2_op_abort_fails_with_operation_busy_error_test() {
             return;
         }
         assert_eq!(result, 0);
+
+        let sl = SecLevel::tee();
+        delete_app_key(&sl.keystore2, alias).unwrap();
     }
 }

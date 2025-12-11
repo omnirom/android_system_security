@@ -55,12 +55,7 @@ pub fn feed_devices() {
     let data = match get_entropy(km_devs.len() * ENTROPY_SIZE) {
         Ok(data) => data,
         Err(e) => {
-            error!(
-                "Failed to retrieve {}*{} bytes of entropy: {:?}",
-                km_devs.len(),
-                ENTROPY_SIZE,
-                e
-            );
+            error!("Failed to retrieve {}*{ENTROPY_SIZE} bytes of entropy: {e:?}", km_devs.len());
             return;
         }
     };
@@ -68,7 +63,7 @@ pub fn feed_devices() {
         let offset = i * ENTROPY_SIZE;
         let sub_data = &data[offset..(offset + ENTROPY_SIZE)];
         if let Err(e) = km_dev.addRngEntropy(sub_data) {
-            error!("Failed to feed entropy to KeyMint device: {:?}", e);
+            error!("Failed to feed entropy to KeyMint device: {e:?}");
         }
     }
 }

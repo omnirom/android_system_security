@@ -21,6 +21,7 @@
 use crate::error::Error as KsError;
 use crate::error::ResponseCode;
 use crate::ks_err;
+use crate::utils::AppUid;
 use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, KeyPermission::KeyPermission,
 };
@@ -279,17 +280,17 @@ pub fn check_keystore_permission(caller_ctx: &CStr, perm: KeystorePerm) -> anyho
 /// The only viable target domains are
 ///  * `Domain::APP` in which case u:r:keystore:s0 is used as target context and
 ///  * `Domain::SELINUX` in which case the `key.nspace` parameter is looked up in
-///                      SELinux keystore key backend, and the result is used
-///                      as target context.
+///    SELinux keystore key backend, and the result is used
+///    as target context.
 pub fn check_grant_permission(
-    caller_uid: u32,
+    caller_uid: AppUid,
     caller_ctx: &CStr,
     access_vec: KeyPermSet,
     key: &KeyDescriptor,
 ) -> anyhow::Result<()> {
     let target_context = match key.domain {
         Domain::APP => {
-            if caller_uid as i64 != key.nspace {
+            if caller_uid.0 != key.nspace {
                 return Err(selinux::Error::perm())
                     .context("Trying to access key without ownership.");
             }
@@ -324,20 +325,20 @@ pub fn check_grant_permission(
 /// The behavior differs slightly depending on the selected target domain:
 ///  * `Domain::APP` u:r:keystore:s0 is used as target context.
 ///  * `Domain::SELINUX` `key.nspace` parameter is looked up in the SELinux keystore key
-///                      backend, and the result is used as target context.
+///    backend, and the result is used as target context.
 ///  * `Domain::BLOB` Same as SELinux but the "manage_blob" permission is always checked additionally
-///                   to the one supplied in `perm`.
+///    to the one supplied in `perm`.
 ///  * `Domain::GRANT` Does not use selinux::check_permission. Instead the `access_vector`
-///                    parameter is queried for permission, which must be supplied in this case.
+///    parameter is queried for permission, which must be supplied in this case.
 ///
 /// ## Return values.
 ///  * Ok(()) If the requested permissions were granted.
 ///  * Err(selinux::Error::perm()) If the requested permissions were denied.
 ///  * Err(KsError::sys()) This error is produced if `Domain::GRANT` is selected but no `access_vec`
-///                      was supplied. It is also produced if `Domain::KEY_ID` was selected, and
-///                      on various unexpected backend failures.
+///    was supplied. It is also produced if `Domain::KEY_ID` was selected, and
+///    on various unexpected backend failures.
 pub fn check_key_permission(
-    caller_uid: u32,
+    caller_uid: AppUid,
     caller_ctx: &CStr,
     perm: KeyPerm,
     key: &KeyDescriptor,
@@ -359,7 +360,7 @@ pub fn check_key_permission(
     let target_context = match key.domain {
         // apps get the default keystore context
         Domain::APP => {
-            if caller_uid as i64 != key.nspace {
+            if caller_uid.0 != key.nspace {
                 return Err(selinux::Error::perm())
                     .context("Trying to access key without ownership.");
             }

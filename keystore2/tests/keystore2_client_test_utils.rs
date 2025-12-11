@@ -153,6 +153,16 @@ macro_rules! require_keymint {
     };
 }
 
+#[macro_export]
+macro_rules! skip_if_no_hw_curve25519_support {
+    ($sl:ident) => {
+        if $sl.get_keymint_version() < 2 {
+            // Curve 25519 was included in version 2 of the KeyMint interface.
+            return;
+        }
+    };
+}
+
 /// Generate EC key and grant it to the list of users with given access vector.
 /// Returns the list of granted keys `nspace` values in the order of given grantee uids.
 pub fn generate_ec_key_and_grant_to_users(
@@ -320,6 +330,7 @@ pub unsafe fn execute_op_run_as_child(
     agid: Gid,
     forced_op: ForcedOp,
 ) -> run_as::ChildHandle<TestOutcome, BarrierReached> {
+    let al = alias.unwrap();
     let child_fn = move |reader: &mut ChannelReader<BarrierReached>,
                          writer: &mut ChannelWriter<BarrierReached>| {
         let result = key_generations::map_ks_error(create_signing_operation(
@@ -328,7 +339,7 @@ pub unsafe fn execute_op_run_as_child(
             Digest::SHA_2_256,
             domain,
             nspace,
-            alias,
+            Some(al.clone()),
         ));
 
         // Let the parent know that an operation has been started, then
@@ -338,20 +349,25 @@ pub unsafe fn execute_op_run_as_child(
         reader.recv();
 
         // Continue performing the operation after parent notifies.
-        match &result {
+        let status = match &result {
             Ok(CreateOperationResponse { iOperation: Some(op), .. }) => {
                 match key_generations::map_ks_error(perform_sample_sign_operation(op)) {
                     Ok(()) => TestOutcome::Ok,
                     Err(Error::Km(ErrorCode::INVALID_OPERATION_HANDLE)) => {
                         TestOutcome::InvalidHandle
                     }
-                    Err(e) => panic!("Error in performing op: {:#?}", e),
+                    Err(e) => panic!("Error in performing op: {e:#?}"),
                 }
             }
             Ok(_) => TestOutcome::OtherErr,
             Err(Error::Rc(ResponseCode::BACKEND_BUSY)) => TestOutcome::BackendBusy,
             _ => TestOutcome::OtherErr,
-        }
+        };
+
+        let sl = SecLevel::tee();
+        delete_key(&sl.keystore2, domain, nspace, Some(al), None).unwrap();
+
+        status
     };
 
     // Safety: The caller guarantees that there are no other threads.
@@ -437,12 +453,18 @@ pub fn delete_app_key(
     keystore2: &binder::Strong<dyn IKeystoreService>,
     alias: &str,
 ) -> binder::Result<()> {
-    keystore2.deleteKey(&KeyDescriptor {
-        domain: Domain::APP,
-        nspace: -1,
-        alias: Some(alias.to_string()),
-        blob: None,
-    })
+    delete_key(keystore2, Domain::APP, -1, Some(alias.to_string()), None)
+}
+
+/// Delete a key with the given alias or blob.
+pub fn delete_key(
+    keystore2: &binder::Strong<dyn IKeystoreService>,
+    domain: Domain,
+    nspace: i64,
+    alias: Option<String>,
+    blob: Option<Vec<u8>>,
+) -> binder::Result<()> {
+    keystore2.deleteKey(&KeyDescriptor { domain, nspace, alias, blob })
 }
 
 /// Deletes all entries from keystore.
@@ -588,18 +610,18 @@ pub fn get_attest_id_value(attest_id: Tag, prop_name: &str) -> Option<Vec<u8>> {
     match attest_id {
         Tag::ATTESTATION_ID_IMEI => get_imei(0),
         Tag::ATTESTATION_ID_SECOND_IMEI => get_imei(1),
-        Tag::ATTESTATION_ID_SERIAL => Some(get_system_prop(format!("ro.{}", prop_name).as_str())),
+        Tag::ATTESTATION_ID_SERIAL => Some(get_system_prop(format!("ro.{prop_name}").as_str())),
         _ => {
             let prop_val =
-                get_system_prop(format!("ro.product.{}_for_attestation", prop_name).as_str());
+                get_system_prop(format!("ro.product.{prop_name}_for_attestation").as_str());
             if !prop_val.is_empty() {
                 Some(prop_val)
             } else {
-                let prop_val = get_system_prop(format!("ro.product.vendor.{}", prop_name).as_str());
+                let prop_val = get_system_prop(format!("ro.product.vendor.{prop_name}").as_str());
                 if !prop_val.is_empty() {
                     Some(prop_val)
                 } else {
-                    Some(get_system_prop(format!("ro.product.{}", prop_name).as_str()))
+                    Some(get_system_prop(format!("ro.product.{prop_name}").as_str()))
                 }
             }
         }

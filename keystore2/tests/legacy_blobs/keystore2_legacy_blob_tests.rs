@@ -143,7 +143,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                 println!("User did exist, deleted successfully");
             }
             Err(e) => {
-                println!("onUserRemoved error: {:#?}", e);
+                println!("onUserRemoved error: {e:#?}");
             }
         }
         let sl = SecLevel::tee();
@@ -216,10 +216,10 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
         let auth_service = get_authorization();
         match auth_service.onDeviceUnlocked(99, Some(PASSWORD)) {
             Ok(result) => {
-                println!("Unlock Result: {:?}", result);
+                println!("Unlock Result: {result:?}");
             }
             Err(e) => {
-                panic!("Unlock should have succeeded: {:?}", e);
+                panic!("Unlock should have succeeded: {e:?}");
             }
         }
 
@@ -303,7 +303,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                         == SecurityLevel::SecurityLevel::TRUSTED_ENVIRONMENT
                 });
 
-                println!("GetKeyEntry response key params: {:#?}", key_params);
+                println!("GetKeyEntry response key params: {key_params:#?}");
                 println!("Generated key params: {:#?}", gen_key_result.key_parameters);
 
                 gen_key_result.key_parameters.append(&mut legacy_file_key_params);
@@ -322,7 +322,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
                 assert_eq!(gen_key_result.key_parameters.len(), 0);
             }
             Err(s) => {
-                panic!("getKeyEntry should have succeeded. {:?}", s);
+                panic!("getKeyEntry should have succeeded. {s:?}");
             }
         };
     };
@@ -334,7 +334,7 @@ fn keystore2_encrypted_characteristics() -> anyhow::Result<()> {
     // Make sure keystore2 clean up imported legacy db.
     let path_buf = PathBuf::from("/data/misc/keystore/user_99");
     if path_buf.as_path().is_dir() {
-        panic!("Keystore service should have deleted this dir {:?}", path_buf);
+        panic!("Keystore service should have deleted this dir {path_buf:?}");
     }
     Ok(())
 }
@@ -386,7 +386,7 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                 println!("User did exist, deleted successfully");
             }
             Err(e) => {
-                println!("onUserRemoved error: {:#?}", e);
+                println!("onUserRemoved error: {e:#?}");
             }
         }
 
@@ -462,10 +462,10 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
         let auth_service = get_authorization();
         match auth_service.onDeviceUnlocked(98, Some(PASSWORD)) {
             Ok(result) => {
-                println!("Unlock Result: {:?}", result);
+                println!("Unlock Result: {result:?}");
             }
             Err(e) => {
-                panic!("Unlock should have succeeded: {:?}", e);
+                panic!("Unlock should have succeeded: {e:?}");
             }
         }
 
@@ -515,17 +515,17 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                     key_params.push(key_param);
                 }
 
-                println!("GetKeyEntry response key params: {:#?}", key_params);
+                println!("GetKeyEntry response key params: {key_params:#?}");
                 println!("Generated key params: {:#?}", gen_key_result.key_parameters);
                 match structured_test_params_cache() {
                     LegacyKeyCharacteristics::Cache(legacy_key_params) => {
-                        println!("Legacy key-char cache: {:#?}", legacy_key_params);
+                        println!("Legacy key-char cache: {legacy_key_params:#?}");
                         // Validate all keyparameters present in getKeyEntry response.
                         for param in &legacy_key_params {
                             key_params.retain(|in_element| *in_element != *param);
                         }
 
-                        println!("GetKeyEntry response unmatched key params: {:#?}", key_params);
+                        println!("GetKeyEntry response unmatched key params: {key_params:#?}");
                         assert_eq!(key_params.len(), 0);
                     }
                     _ => {
@@ -534,7 +534,7 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
                 }
             }
             Err(s) => {
-                panic!("getKeyEntry should have succeeded. {:?}", s);
+                panic!("getKeyEntry should have succeeded. {s:?}");
             }
         };
     };
@@ -546,7 +546,7 @@ fn keystore2_encrypted_certificates() -> anyhow::Result<()> {
     // Make sure keystore2 clean up imported legacy db.
     let path_buf = PathBuf::from("/data/misc/keystore/user_98");
     if path_buf.as_path().is_dir() {
-        panic!("Keystore service should have deleted this dir {:?}", path_buf);
+        panic!("Keystore service should have deleted this dir {path_buf:?}");
     }
     Ok(())
 }

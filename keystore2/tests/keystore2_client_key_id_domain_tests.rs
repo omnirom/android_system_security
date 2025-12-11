@@ -97,6 +97,7 @@ fn keystore2_find_key_with_key_id_as_domain() {
             &op_response.iOperation.unwrap()
         ))
     );
+    sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Generate a key with an alias. Generate another key and bind it to the same alias.
@@ -164,6 +165,7 @@ fn keystore2_key_id_alias_rebind_verify_by_alias() {
             &op_response.iOperation.unwrap()
         ))
     );
+    sl.keystore2.deleteKey(&new_key_metadata.key).unwrap();
 }
 
 /// Generate a key with an alias. Load the generated key with `Domain::KEY_ID`. Generate another
@@ -250,4 +252,5 @@ fn keystore2_key_id_alias_rebind_verify_by_key_id() {
             &op_response.iOperation.unwrap()
         ))
     );
+    sl.keystore2.deleteKey(&new_key_metadata.key).unwrap();
 }

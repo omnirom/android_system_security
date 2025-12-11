@@ -332,6 +332,7 @@ fn keystore2_ec_25519_generate_key_success() {
             &op_response.iOperation.unwrap()
         ))
     );
+    sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Generate EC keys with curve `CURVE_25519` and digest modes `MD5, SHA1, SHA-2 224, SHA-2 256,
@@ -375,6 +376,7 @@ fn keystore2_ec_25519_generate_key_fail() {
             assert!(result.is_err(), "unexpected success for digest {digest:?}");
             assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_DIGEST), result.unwrap_err());
         }
+        sl.keystore2.deleteKey(&key_metadata.key).unwrap();
     }
 }
 
@@ -408,6 +410,7 @@ fn keystore2_create_op_with_incompatible_key_digest() {
         assert!(result.is_err());
         assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_DIGEST), result.unwrap_err());
     }
+    sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Generate a key in client#1 and try to use it in other client#2.

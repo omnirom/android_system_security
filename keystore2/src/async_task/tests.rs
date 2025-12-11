@@ -88,12 +88,12 @@ fn test_async_task() {
         let j = i;
         at.queue_lo(move |shelf| {
             let trace = shelf.get_mut::<Vec<String>>();
-            trace.push(format!("L{}", j));
+            trace.push(format!("L{j}"));
         });
         let j = i;
         at.queue_hi(move |shelf| {
             let trace = shelf.get_mut::<Vec<String>>();
-            trace.push(format!("H{}", j));
+            trace.push(format!("H{j}"));
         });
     }
 

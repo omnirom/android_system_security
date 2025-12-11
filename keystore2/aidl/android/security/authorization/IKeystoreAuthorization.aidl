@@ -53,7 +53,7 @@ interface IKeystoreAuthorization {
      *  - The (correct) password is provided, proving that the user has authenticated using LSKF or
      *    equivalent.  This is the most powerful type of unlock.  Keystore uses the password to
      *    decrypt the user's UnlockedDeviceRequired super keys from disk.  It also uses the password
-     *    to decrypt the user's AfterFirstUnlock super key from disk, if not already done.
+     *    to decrypt the user's CredentialEncrypted super key from disk, if not already done.
      *
      *  - The user's UnlockedDeviceRequired super keys are cached in biometric-encrypted form, and a
      *    matching valid HardwareAuthToken has been added to Keystore.  I.e., class 3 biometric
@@ -107,6 +107,17 @@ interface IKeystoreAuthorization {
      * @param weakUnlockEnabled Whether a weak unlock method can unlock the device for the user
      */
     void onDeviceLocked(in int userId, in long[] unlockingSids, in boolean weakUnlockEnabled);
+
+    /**
+    * Tells keystore about a user's credential-encrypted storage being locked.
+    * Callers require 'Lock' permission
+    *
+    * ## Error conditions:
+    * 'ResponseCode::PERMISSION_DENIED' - if the callers do not have the 'Lock' permission.
+    *
+    * @param userId - Android user id
+    */
+    void onUserStorageLocked(in int userId);
 
     /**
      * Tells Keystore that weak unlock methods can no longer unlock the device for the given user.

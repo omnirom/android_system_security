@@ -26,6 +26,7 @@ use android_security_compat::aidl::android::security::compat::IKeystoreCompatSer
 use anyhow::Result;
 use binder::get_declared_instances;
 use keystore2_hal_names::get_hidl_instances;
+use log::{error, info, warn};
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
@@ -45,7 +46,7 @@ pub fn perform_shared_secret_negotiation() {
             .expect("In perform_shared_secret_negotiation: Trying to list participants.");
         let connected = connect_participants(participants);
         negotiate_shared_secret(connected);
-        log::info!("Shared secret negotiation concluded successfully.");
+        info!("Shared secret negotiation concluded successfully.");
 
         // Once shared secret negotiation is done, the StrongBox and TEE have a common key that
         // can be used to authenticate a possible RootOfTrust transfer.
@@ -98,10 +99,10 @@ fn filter_map_legacy_km_instances(
         "default" => Some(SharedSecretParticipant::Hidl { is_strongbox: false, version }),
         "strongbox" => Some(SharedSecretParticipant::Hidl { is_strongbox: true, version }),
         _ => {
-            log::warn!("Found unexpected keymaster instance: \"{}\"", name);
-            log::warn!("Device is misconfigured. Allowed instances are:");
-            log::warn!("   * default");
-            log::warn!("   * strongbox");
+            warn!("Found unexpected keymaster instance: '{name}'");
+            warn!("Device is misconfigured. Allowed instances are:");
+            warn!("   * default");
+            warn!("   * strongbox");
             None
         }
     }
@@ -155,71 +156,67 @@ fn connect_participants(
     let mut connected_participants: Vec<(Strong<dyn ISharedSecret>, SharedSecretParticipant)> =
         vec![];
     loop {
-        let (connected, not_connected) = participants.into_iter().fold(
-            (connected_participants, vec![]),
-            |(mut connected, mut failed), e| {
-                match e {
-                    SharedSecretParticipant::Aidl(instance_name) => {
-                        let service_name = format!(
-                            "{}/{}",
-                            <BpSharedSecret as ISharedSecret>::get_descriptor(),
-                            instance_name
-                        );
-                        match map_binder_status_code(binder::get_interface(&service_name)) {
-                            Err(e) => {
-                                log::warn!(
-                                    "Unable to connect \"{}\" with error:\n{:?}\nRetrying later.",
-                                    service_name,
-                                    e
+        let (connected, not_connected) =
+            participants.into_iter().fold(
+                (connected_participants, vec![]),
+                |(mut connected, mut failed), e| {
+                    match e {
+                        SharedSecretParticipant::Aidl(instance_name) => {
+                            let service_name = format!(
+                                "{}/{}",
+                                <BpSharedSecret as ISharedSecret>::get_descriptor(),
+                                instance_name
+                            );
+                            match map_binder_status_code(binder::get_interface(&service_name)) {
+                                Err(e) => {
+                                    warn!(
+                                    "Unable to connect '{service_name}': {e:?}\nRetrying later.",
                                 );
-                                failed.push(SharedSecretParticipant::Aidl(instance_name));
+                                    failed.push(SharedSecretParticipant::Aidl(instance_name));
+                                }
+                                Ok(service) => connected
+                                    .push((service, SharedSecretParticipant::Aidl(instance_name))),
                             }
-                            Ok(service) => connected
-                                .push((service, SharedSecretParticipant::Aidl(instance_name))),
                         }
-                    }
-                    SharedSecretParticipant::Hidl { is_strongbox, version } => {
-                        // This is a no-op if it was called before.
-                        keystore2_km_compat::add_keymint_device_service();
+                        SharedSecretParticipant::Hidl { is_strongbox, version } => {
+                            // This is a no-op if it was called before.
+                            keystore2_km_compat::add_keymint_device_service();
 
-                        // If we cannot connect to the compatibility service there is no way to
-                        // recover.
-                        // PANIC! - Unless you brought your towel.
-                        let keystore_compat_service: Strong<dyn IKeystoreCompatService> =
-                            map_binder_status_code(binder::get_interface(COMPAT_PACKAGE_NAME))
-                                .expect(
+                            // If we cannot connect to the compatibility service there is no way to
+                            // recover.
+                            // PANIC! - Unless you brought your towel.
+                            let keystore_compat_service: Strong<dyn IKeystoreCompatService> =
+                                map_binder_status_code(binder::get_interface(COMPAT_PACKAGE_NAME))
+                                    .expect(
                                     "In connect_participants: Trying to connect to compat service.",
                                 );
 
-                        match map_binder_status(keystore_compat_service.getSharedSecret(
-                            if is_strongbox {
-                                SecurityLevel::STRONGBOX
-                            } else {
-                                SecurityLevel::TRUSTED_ENVIRONMENT
-                            },
-                        )) {
-                            Err(e) => {
-                                log::warn!(
-                                    concat!(
-                                        "Unable to connect keymaster device \"{}\" ",
-                                        "with error:\n{:?}\nRetrying later."
-                                    ),
-                                    if is_strongbox { "strongbox" } else { "TEE" },
-                                    e
-                                );
-                                failed
-                                    .push(SharedSecretParticipant::Hidl { is_strongbox, version });
+                            match map_binder_status(keystore_compat_service.getSharedSecret(
+                                if is_strongbox {
+                                    SecurityLevel::STRONGBOX
+                                } else {
+                                    SecurityLevel::TRUSTED_ENVIRONMENT
+                                },
+                            )) {
+                                Err(e) => {
+                                    warn!("Unable to connect {} keymaster device: {e:?}\nRetrying later.",
+                                        if is_strongbox { "StrongBox" } else { "TEE" },
+                                    );
+                                    failed.push(SharedSecretParticipant::Hidl {
+                                        is_strongbox,
+                                        version,
+                                    });
+                                }
+                                Ok(service) => connected.push((
+                                    service,
+                                    SharedSecretParticipant::Hidl { is_strongbox, version },
+                                )),
                             }
-                            Ok(service) => connected.push((
-                                service,
-                                SharedSecretParticipant::Hidl { is_strongbox, version },
-                            )),
                         }
                     }
-                }
-                (connected, failed)
-            },
-        );
+                    (connected, failed)
+                },
+            );
         participants = not_connected;
         connected_participants = connected;
         if participants.is_empty() {
@@ -245,8 +242,8 @@ fn negotiate_shared_secret(
 
         match result {
             Err(e) => {
-                log::warn!("{:?}", e);
-                log::warn!("Retrying in one second.");
+                warn!("{e:?}");
+                warn!("Retrying in one second.");
                 std::thread::sleep(Duration::from_millis(1000));
             }
             Ok(params) => break params,
@@ -271,9 +268,9 @@ fn negotiate_shared_secret(
     });
 
     if let Err(e) = negotiation_result {
-        log::error!("In negotiate_shared_secret: {:?}.", e);
+        error!("In negotiate_shared_secret: {e:?}");
         if let SharedSecretError::Checksum(_) = e {
-            log::error!(concat!(
+            error!(concat!(
                 "This means that this device is NOT PROVISIONED CORRECTLY.\n",
                 "User authorization and other security functions will not work\n",
                 "as expected. Please contact your OEM for instructions.",
@@ -287,7 +284,7 @@ pub fn transfer_root_of_trust() {
     let strongbox = match get_keymint_device(&SecurityLevel::STRONGBOX) {
         Ok((s, _, _)) => s,
         Err(_e) => {
-            log::info!("No StrongBox Keymint available, so no RoT transfer");
+            info!("No StrongBox Keymint available, so no RoT transfer");
             return;
         }
     };
@@ -299,7 +296,7 @@ pub fn transfer_root_of_trust() {
             // - it already has RootOfTrust information
             // - it's a KeyMint v1 implementation that doesn't understand the method.
             // In either case, we're done.
-            log::info!("StrongBox does not provide a challenge, so no RoT transfer: {:?}", e);
+            info!("StrongBox does not provide a challenge, so no RoT transfer: {e:?}");
             return;
         }
     };
@@ -307,14 +304,14 @@ pub fn transfer_root_of_trust() {
     let tee = match get_keymint_device(&SecurityLevel::TRUSTED_ENVIRONMENT) {
         Ok((s, _, _)) => s,
         Err(e) => {
-            log::error!("No TEE KeyMint implementation found! {:?}", e);
+            error!("No TEE KeyMint implementation found! {e:?}");
             return;
         }
     };
     let root_of_trust = match tee.getRootOfTrust(&challenge) {
         Ok(rot) => rot,
         Err(e) => {
-            log::error!("TEE KeyMint failed to return RootOfTrust info: {:?}", e);
+            error!("TEE KeyMint failed to return RootOfTrust info: {e:?}");
             return;
         }
     };
@@ -322,7 +319,7 @@ pub fn transfer_root_of_trust() {
     // Just pass it on to the StrongBox KeyMint instance.
     let result = strongbox.sendRootOfTrust(&root_of_trust);
     if let Err(e) = result {
-        log::error!("Failed to send RootOfTrust to StrongBox: {:?}", e);
+        error!("Failed to send RootOfTrust to StrongBox: {e:?}");
     }
-    log::info!("RootOfTrust transfer process complete");
+    info!("RootOfTrust transfer process complete");
 }

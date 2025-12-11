@@ -38,13 +38,15 @@ use android_security_metrics::aidl::android::security::metrics::{
     KeyCreationWithPurposeAndModesInfo::KeyCreationWithPurposeAndModesInfo,
     KeyOperationWithGeneralInfo::KeyOperationWithGeneralInfo,
     KeyOperationWithPurposeAndModesInfo::KeyOperationWithPurposeAndModesInfo,
-    KeyOrigin::KeyOrigin as MetricsKeyOrigin, Keystore2AtomWithOverflow::Keystore2AtomWithOverflow,
-    KeystoreAtom::KeystoreAtom, KeystoreAtomPayload::KeystoreAtomPayload,
-    Outcome::Outcome as MetricsOutcome, Purpose::Purpose as MetricsPurpose,
-    RkpError::RkpError as MetricsRkpError, RkpErrorStats::RkpErrorStats,
-    SecurityLevel::SecurityLevel as MetricsSecurityLevel, Storage::Storage as MetricsStorage,
+    KeyOrigin::KeyOrigin as MetricsKeyOrigin, KeysPerUid::KeysPerUid,
+    Keystore2AtomWithOverflow::Keystore2AtomWithOverflow, KeystoreAtom::KeystoreAtom,
+    KeystoreAtomPayload::KeystoreAtomPayload, Outcome::Outcome as MetricsOutcome,
+    Purpose::Purpose as MetricsPurpose, RkpError::RkpError as MetricsRkpError,
+    RkpErrorStats::RkpErrorStats, SecurityLevel::SecurityLevel as MetricsSecurityLevel,
+    Storage::Storage as MetricsStorage,
 };
 use anyhow::{anyhow, Context, Result};
+use log::{error, warn};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
@@ -54,6 +56,14 @@ mod tests;
 // Note: Crash events are recorded at keystore restarts, based on the assumption that keystore only
 // gets restarted after a crash, during a boot cycle.
 const KEYSTORE_CRASH_COUNT_PROPERTY: &str = "keystore.crash_count";
+
+/// The Keystore2KeysPerUid atom should be emitted for the top X UIDs with a key count > Y.
+/// This constant is X.
+pub const KEYS_PER_UID_MAX_UIDS: usize = 10;
+
+/// The Keystore2KeysPerUid atom should be emitted for the top X UIDs with a key count > Y.
+/// This constant is Y.
+pub const KEYS_PER_UID_MIN_KEY_COUNT: usize = 5;
 
 /// Singleton for MetricsStore.
 pub static METRICS_STORE: LazyLock<MetricsStore> = LazyLock::new(Default::default);
@@ -105,34 +115,53 @@ impl MetricsStore {
     /// If any atom object does not exist in the metrics_store for the given atom ID, return an
     /// empty vector.
     pub fn get_atoms(&self, atom_id: AtomID) -> Result<Vec<KeystoreAtom>> {
-        // StorageStats is an original pulled atom (i.e. not a pushed atom converted to a
-        // pulled atom). Therefore, it is handled separately.
-        if AtomID::STORAGE_STATS == atom_id {
-            let _wp = wd::watch("MetricsStore::get_atoms calling pull_storage_stats");
-            return pull_storage_stats();
+        match atom_id {
+            // StorageStats, KeysPerUid, and CrashStats are handled separately since they
+            // aren't recorded in the metrics store map. Instead, the atom values are
+            // computed when the pull is triggered.
+            AtomID::STORAGE_STATS => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling pull_storage_stats");
+                pull_storage_stats()
+            }
+            AtomID::KEYS_PER_UID => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling pull_keys_per_uid");
+                pull_keys_per_uid()
+            }
+            AtomID::CRASH_STATS => {
+                let _wp = wd::watch("MetricsStore::get_atoms calling read_keystore_crash_count");
+                match read_keystore_crash_count()? {
+                    Some(count) => Ok(vec![KeystoreAtom {
+                        payload: KeystoreAtomPayload::CrashStats(CrashStats {
+                            count_of_crash_events: count,
+                        }),
+                        ..Default::default()
+                    }]),
+                    None => Err(anyhow!("Crash count property is not set")),
+                }
+            }
+            AtomID::KEY_CREATION_WITH_GENERAL_INFO
+            | AtomID::KEY_CREATION_WITH_AUTH_INFO
+            | AtomID::KEY_CREATION_WITH_PURPOSE_AND_MODES_INFO
+            | AtomID::KEYSTORE2_ATOM_WITH_OVERFLOW
+            | AtomID::KEY_OPERATION_WITH_PURPOSE_AND_MODES_INFO
+            | AtomID::KEY_OPERATION_WITH_GENERAL_INFO
+            | AtomID::RKP_ERROR_STATS => {
+                let metrics_store_guard = self.metrics_store.lock().unwrap();
+                metrics_store_guard.get(&atom_id).map_or(
+                    Ok(Vec::<KeystoreAtom>::new()),
+                    |atom_count_map| {
+                        Ok(atom_count_map
+                            .iter()
+                            .map(|(atom, count)| KeystoreAtom {
+                                payload: atom.clone(),
+                                count: *count,
+                            })
+                            .collect())
+                    },
+                )
+            }
+            _ => Err(anyhow!("MetricsStore::get_atoms: Unrecognized AtomID {:?}", atom_id)),
         }
-
-        // Process keystore crash stats.
-        if AtomID::CRASH_STATS == atom_id {
-            let _wp = wd::watch("MetricsStore::get_atoms calling read_keystore_crash_count");
-            return match read_keystore_crash_count()? {
-                Some(count) => Ok(vec![KeystoreAtom {
-                    payload: KeystoreAtomPayload::CrashStats(CrashStats {
-                        count_of_crash_events: count,
-                    }),
-                    ..Default::default()
-                }]),
-                None => Err(anyhow!("Crash count property is not set")),
-            };
-        }
-
-        let metrics_store_guard = self.metrics_store.lock().unwrap();
-        metrics_store_guard.get(&atom_id).map_or(Ok(Vec::<KeystoreAtom>::new()), |atom_count_map| {
-            Ok(atom_count_map
-                .iter()
-                .map(|(atom, count)| KeystoreAtom { payload: atom.clone(), count: *count })
-                .collect())
-        })
     }
 
     /// Insert an atom object to the metrics_store indexed by the atom ID.
@@ -155,7 +184,7 @@ impl MetricsStore {
                 *atom_count += 1;
             } else {
                 // This is a rare case, if at all.
-                log::error!("In insert_atom: Maximum storage limit reached for overflow atom.")
+                error!("In insert_atom: Maximum storage limit reached for overflow atom.")
             }
         }
     }
@@ -553,7 +582,7 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
                 ..Default::default()
             }),
             Err(error) => {
-                log::error!("pull_metrics_callback: Error getting storage stat: {}", error)
+                error!("pull_metrics_callback: Error getting storage stat: {error}")
             }
         };
     };
@@ -577,6 +606,27 @@ pub(crate) fn pull_storage_stats() -> Result<Vec<KeystoreAtom>> {
     Ok(atom_vec)
 }
 
+fn pull_keys_per_uid() -> Result<Vec<KeystoreAtom>> {
+    let counts = DB.with(|db| {
+        let mut db = db.borrow_mut();
+        db.per_uid_counts(KEYS_PER_UID_MAX_UIDS, KEYS_PER_UID_MIN_KEY_COUNT).unwrap_or_else(|e| {
+            error!("pull_keys_per_uid: failed to retrieve top per-UID key counts: {e:?}");
+            Vec::new()
+        })
+    });
+    Ok(counts
+        .into_iter()
+        .map(|(uid, count)| {
+            let key_count: i32 = count.try_into().unwrap_or_else(|e| {
+                error!("pull_keys_per_uid: key count {count} for {uid} out of range: {e:?}");
+                i32::MAX
+            });
+            let s = KeysPerUid { uid, key_count };
+            KeystoreAtom { payload: KeystoreAtomPayload::KeysPerUid(s), ..Default::default() }
+        })
+        .collect())
+}
+
 /// Log error events related to Remote Key Provisioning (RKP).
 pub fn log_rkp_error_stats(rkp_error: MetricsRkpError, sec_level: &SecurityLevel) {
     let rkp_error_stats = KeystoreAtomPayload::RkpErrorStats(RkpErrorStats {
@@ -596,7 +646,7 @@ pub fn update_keystore_crash_sysprop() {
         // Proceed to write the system property with value 0.
         Ok(None) => 0,
         Err(error) => {
-            log::warn!(
+            warn!(
                 concat!(
                     "In update_keystore_crash_sysprop: ",
                     "Failed to read the existing system property due to: {:?}.",
@@ -611,7 +661,7 @@ pub fn update_keystore_crash_sysprop() {
     if let Err(e) =
         rustutils::system_properties::write(KEYSTORE_CRASH_COUNT_PROPERTY, &new_count.to_string())
     {
-        log::error!(
+        error!(
             concat!(
                 "In update_keystore_crash_sysprop:: ",
                 "Failed to write the system property due to error: {:?}"
@@ -744,6 +794,7 @@ impl_summary_enum!(AtomID, 14,
     KEY_OPERATION_WITH_GENERAL_INFO => "KEYOP_GENERAL",
     RKP_ERROR_STATS => "RKP_ERR",
     CRASH_STATS => "CRASH",
+    KEYS_PER_UID => "KEYS_PER_UID",
 );
 
 impl_summary_enum!(MetricsStorage, 28,
@@ -979,6 +1030,9 @@ impl Summary for KeystoreAtomPayload {
             }
             KeystoreAtomPayload::Keystore2AtomWithOverflow(v) => {
                 format!("atom={}", v.atom_id.show())
+            }
+            KeystoreAtomPayload::KeysPerUid(v) => {
+                format!("uid={} key_count={}", v.uid, v.key_count)
             }
         }
     }

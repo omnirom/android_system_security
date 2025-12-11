@@ -21,6 +21,7 @@ import android.security.metrics.KeyCreationWithPurposeAndModesInfo;
 import android.security.metrics.KeyCreationWithAuthInfo;
 import android.security.metrics.KeyOperationWithGeneralInfo;
 import android.security.metrics.KeyOperationWithPurposeAndModesInfo;
+import android.security.metrics.KeysPerUid;
 import android.security.metrics.StorageStats;
 import android.security.metrics.Keystore2AtomWithOverflow;
 import android.security.metrics.RkpErrorStats;
@@ -38,4 +39,5 @@ union KeystoreAtomPayload {
     KeyOperationWithGeneralInfo keyOperationWithGeneralInfo;
     RkpErrorStats rkpErrorStats;
     CrashStats crashStats;
+    KeysPerUid keysPerUid;
 }

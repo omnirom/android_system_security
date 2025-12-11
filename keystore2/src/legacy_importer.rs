@@ -22,10 +22,10 @@ use crate::error::{map_km_error, Error};
 use crate::key_parameter::{KeyParameter, KeyParameterValue};
 use crate::ks_err;
 use crate::legacy_blob::{self, Blob, BlobValue, LegacyKeyCharacteristics};
-use crate::super_key::USER_AFTER_FIRST_UNLOCK_SUPER_KEY;
+use crate::super_key::CREDENTIAL_ENCRYPTED_SUPER_KEY;
 use crate::utils::{
-    key_characteristics_to_internal, uid_to_android_user, upgrade_keyblob_if_required_with,
-    watchdog as wd, AesGcm,
+    key_characteristics_to_internal, upgrade_keyblob_if_required_with, watchdog as wd, AesGcm,
+    AndroidUserId, AppUid, AID_SYSTEM,
 };
 use crate::{async_task::AsyncTask, legacy_blob::LegacyBlobLoader};
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
@@ -35,6 +35,7 @@ use android_system_keystore2::aidl::android::system::keystore2::{
 use anyhow::{Context, Result};
 use core::ops::Deref;
 use keystore2_crypto::{Password, ZVec};
+use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::channel;
@@ -61,24 +62,24 @@ pub struct LegacyImporter {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct RecentImport {
-    uid: u32,
+    uid: AppUid,
     alias: String,
 }
 
 impl RecentImport {
-    fn new(uid: u32, alias: String) -> Self {
+    fn new(uid: AppUid, alias: String) -> Self {
         Self { uid, alias }
     }
 }
 
 enum BulkDeleteRequest {
-    Uid(u32),
-    User(u32),
+    Uid(AppUid),
+    User(AndroidUserId),
 }
 
 struct LegacyImporterState {
     recently_imported: HashSet<RecentImport>,
-    recently_imported_super_key: HashSet<u32>,
+    recently_imported_super_key: HashSet<AndroidUserId>,
     legacy_loader: Arc<LegacyBlobLoader>,
     sec_level_to_km_uuid: HashMap<SecurityLevel, Uuid>,
     db: KeystoreDB,
@@ -86,7 +87,7 @@ struct LegacyImporterState {
 
 impl LegacyImporter {
     const WIFI_NAMESPACE: i64 = 102;
-    const AID_WIFI: u32 = 1010;
+    const AID_WIFI: AppUid = AppUid(1010);
 
     const STATE_UNINITIALIZED: u8 = 0;
     const STATE_READY: u8 = 1;
@@ -195,7 +196,7 @@ impl LegacyImporter {
                         .context(ks_err!("Legacy loader should not be called uninitialized."));
                 }
                 (Self::STATE_READY, _) => return Ok(Self::STATE_READY),
-                (s, _) => panic!("Unknown legacy importer state. {} ", s),
+                (s, _) => panic!("Unknown legacy importer state. {s} "),
             }
         }
     }
@@ -205,7 +206,7 @@ impl LegacyImporter {
         let _wp = wd::watch("LegacyImporter::list_uid");
 
         let uid = match (domain, namespace) {
-            (Domain::APP, namespace) => namespace as u32,
+            (Domain::APP, namespace) => AppUid(namespace),
             (Domain::SELINUX, Self::WIFI_NAMESPACE) => Self::AID_WIFI,
             _ => return Ok(Vec::new()),
         };
@@ -236,7 +237,7 @@ impl LegacyImporter {
             Ok(LegacyImporter::STATE_EMPTY) => return None,
             Ok(LegacyImporter::STATE_READY) => {}
             Err(e) => return Some(Err(e)),
-            Ok(s) => panic!("Unknown legacy importer state. {} ", s),
+            Ok(s) => panic!("Unknown legacy importer state. {s} "),
         }
 
         // We have established that there may be a key in the legacy database.
@@ -265,7 +266,7 @@ impl LegacyImporter {
 
             // Send the result to the requester.
             if let Err(e) = sender.send((new_state, result)) {
-                log::error!("In do_serialized. Error in sending the result. {:?}", e);
+                error!("In do_serialized. Error in sending the result: {e:?}");
             }
         });
 
@@ -292,7 +293,7 @@ impl LegacyImporter {
     pub fn with_try_import<F, T>(
         &self,
         key: &KeyDescriptor,
-        caller_uid: u32,
+        caller_uid: AppUid,
         super_key: Option<Arc<dyn AesGcm + Send + Sync>>,
         key_accessor: F,
     ) -> Result<T>
@@ -319,7 +320,7 @@ impl LegacyImporter {
                     Self::WIFI_NAMESPACE => Self::AID_WIFI,
                     _ => {
                         return Err(Error::Rc(ResponseCode::KEY_NOT_FOUND))
-                            .context(format!("No legacy keys for namespace {}", nspace))
+                            .context(format!("No legacy keys for namespace {nspace}"))
                     }
                 }
             }
@@ -348,7 +349,7 @@ impl LegacyImporter {
     /// this function makes an import request and on success retries the key_accessor.
     pub fn with_try_import_super_key<F, T>(
         &self,
-        user_id: u32,
+        user: AndroidUserId,
         pw: &Password,
         mut key_accessor: F,
     ) -> Result<Option<T>>
@@ -364,7 +365,7 @@ impl LegacyImporter {
         }
         let pw = pw.try_clone().context(ks_err!("Cloning password."))?;
         let result = self.do_serialized(move |importer_state| {
-            importer_state.check_and_import_super_key(user_id, &pw)
+            importer_state.check_and_import_super_key(user, &pw)
         });
 
         if let Some(result) = result {
@@ -382,7 +383,7 @@ impl LegacyImporter {
         let _wp = wd::watch("LegacyImporter::bulk_delete_uid");
 
         let uid = match (domain, nspace) {
-            (Domain::APP, nspace) => nspace as u32,
+            (Domain::APP, nspace) => AppUid(nspace),
             (Domain::SELINUX, Self::WIFI_NAMESPACE) => Self::AID_WIFI,
             // Nothing to do.
             _ => return Ok(()),
@@ -399,23 +400,21 @@ impl LegacyImporter {
     /// for subsequent garbage collection if necessary.
     pub fn bulk_delete_user(
         &self,
-        user_id: u32,
+        user: AndroidUserId,
         keep_non_super_encrypted_keys: bool,
     ) -> Result<()> {
         let _wp = wd::watch("LegacyImporter::bulk_delete_user");
 
         let result = self.do_serialized(move |importer_state| {
-            importer_state
-                .bulk_delete(BulkDeleteRequest::User(user_id), keep_non_super_encrypted_keys)
+            importer_state.bulk_delete(BulkDeleteRequest::User(user), keep_non_super_encrypted_keys)
         });
 
         result.unwrap_or(Ok(()))
     }
 
     /// Queries the legacy database for the presence of a super key for the given user.
-    pub fn has_super_key(&self, user_id: u32) -> Result<bool> {
-        let result =
-            self.do_serialized(move |importer_state| importer_state.has_super_key(user_id));
+    pub fn has_super_key(&self, user: AndroidUserId) -> Result<bool> {
+        let result = self.do_serialized(move |importer_state| importer_state.has_super_key(user));
         result.unwrap_or(Ok(false))
     }
 }
@@ -433,7 +432,7 @@ impl LegacyImporterState {
         })
     }
 
-    fn list_uid(&mut self, uid: u32) -> Result<Vec<String>> {
+    fn list_uid(&mut self, uid: AppUid) -> Result<Vec<String>> {
         self.legacy_loader
             .list_keystore_entries_for_uid(uid)
             .context("In list_uid: Trying to list legacy entries.")
@@ -443,14 +442,14 @@ impl LegacyImporterState {
     /// If the super_key has already been imported, the super key database id is returned.
     fn get_super_key_id_check_unlockable_or_delete(
         &mut self,
-        uid: u32,
+        uid: AppUid,
         alias: &str,
     ) -> Result<i64> {
-        let user_id = uid_to_android_user(uid);
+        let user = uid.owning_user();
 
         match self
             .db
-            .load_super_key(&USER_AFTER_FIRST_UNLOCK_SUPER_KEY, user_id)
+            .load_super_key(&CREDENTIAL_ENCRYPTED_SUPER_KEY, user)
             .context(ks_err!("Failed to load super key"))?
         {
             Some((_, entry)) => Ok(entry.id()),
@@ -464,7 +463,7 @@ impl LegacyImporterState {
                 // we can return Locked. Otherwise, we can delete the
                 // key and return NotFound, because the key will never
                 // be unlocked again.
-                if self.legacy_loader.has_super_key(user_id) {
+                if self.legacy_loader.has_super_key(user) {
                     Err(Error::Rc(ResponseCode::LOCKED)).context(ks_err!(
                         "Cannot import super key of this key while user is locked."
                     ))
@@ -482,7 +481,7 @@ impl LegacyImporterState {
         &mut self,
         km_blob_params: Option<(Blob, LegacyKeyCharacteristics)>,
         super_key: &Option<Arc<dyn AesGcm>>,
-        uid: u32,
+        uid: AppUid,
         alias: &str,
     ) -> Result<(Option<(Blob, Vec<KeyParameter>)>, Option<(LegacyBlob<'static>, BlobMetaData)>)>
     {
@@ -584,7 +583,7 @@ impl LegacyImporterState {
     /// be passed to do_serialized.
     fn check_and_import(
         &mut self,
-        uid: u32,
+        uid: AppUid,
         mut key: KeyDescriptor,
         super_key: Option<Arc<dyn AesGcm>>,
     ) -> Result<()> {
@@ -600,7 +599,7 @@ impl LegacyImporterState {
         }
 
         if key.domain == Domain::APP {
-            key.nspace = uid as i64;
+            key.nspace = uid.0;
         }
 
         // If the key is not found in the cache, try to load from the legacy database.
@@ -712,15 +711,15 @@ impl LegacyImporterState {
         }
     }
 
-    fn check_and_import_super_key(&mut self, user_id: u32, pw: &Password) -> Result<()> {
-        if self.recently_imported_super_key.contains(&user_id) {
+    fn check_and_import_super_key(&mut self, user: AndroidUserId, pw: &Password) -> Result<()> {
+        if self.recently_imported_super_key.contains(&user) {
             return Ok(());
         }
 
         if let Some(super_key) = self
             .legacy_loader
-            .load_super_key(user_id, pw)
-            .context(ks_err!("Trying to load legacy super key."))?
+            .load_super_key(user, pw)
+            .context(ks_err!("Trying to load legacy super key for {user:?}"))?
         {
             let (blob, blob_metadata) =
                 crate::super_key::SuperKeyManager::encrypt_with_password(&super_key, pw)
@@ -728,15 +727,15 @@ impl LegacyImporterState {
 
             self.db
                 .store_super_key(
-                    user_id,
-                    &USER_AFTER_FIRST_UNLOCK_SUPER_KEY,
+                    user,
+                    &CREDENTIAL_ENCRYPTED_SUPER_KEY,
                     &blob,
                     &blob_metadata,
                     &KeyMetaData::new(),
                 )
                 .context(ks_err!("Trying to insert legacy super_key into the database."))?;
-            self.legacy_loader.remove_super_key(user_id);
-            self.recently_imported_super_key.insert(user_id);
+            self.legacy_loader.remove_super_key(user);
+            self.recently_imported_super_key.insert(user);
             Ok(())
         } else {
             Err(Error::Rc(ResponseCode::KEY_NOT_FOUND)).context(ks_err!("No key found do import."))
@@ -750,30 +749,30 @@ impl LegacyImporterState {
         bulk_delete_request: BulkDeleteRequest,
         keep_non_super_encrypted_keys: bool,
     ) -> Result<()> {
-        let (aliases, user_id) = match bulk_delete_request {
+        let (aliases, user) = match bulk_delete_request {
             BulkDeleteRequest::Uid(uid) => (
                 self.legacy_loader
                     .list_keystore_entries_for_uid(uid)
-                    .context(ks_err!("Trying to get aliases for uid."))
+                    .context(ks_err!("Trying to get aliases for {uid:?}"))
                     .map(|aliases| {
-                        let mut h = HashMap::<u32, HashSet<String>>::new();
+                        let mut h = HashMap::<AppUid, HashSet<String>>::new();
                         h.insert(uid, aliases.into_iter().collect());
                         h
                     })?,
-                uid_to_android_user(uid),
+                uid.owning_user(),
             ),
-            BulkDeleteRequest::User(user_id) => (
+            BulkDeleteRequest::User(user) => (
                 self.legacy_loader
-                    .list_keystore_entries_for_user(user_id)
-                    .context(ks_err!("Trying to get aliases for user_id."))?,
-                user_id,
+                    .list_keystore_entries_for_user(user)
+                    .context(ks_err!("Trying to get aliases for {user:?}"))?,
+                user,
             ),
         };
 
         let super_key_id = self
             .db
-            .load_super_key(&USER_AFTER_FIRST_UNLOCK_SUPER_KEY, user_id)
-            .context(ks_err!("Failed to load super key"))?
+            .load_super_key(&CREDENTIAL_ENCRYPTED_SUPER_KEY, user)
+            .context(ks_err!("Failed to load super key for {user:?}"))?
             .map(|(_, entry)| entry.id());
 
         for (uid, alias) in aliases
@@ -806,8 +805,8 @@ impl LegacyImporterState {
             if keep_non_super_encrypted_keys && !is_super_encrypted {
                 continue;
             }
-            if uid == rustutils::users::AID_SYSTEM && is_de_critical {
-                log::info!("skip deletion of system key '{alias}' which is DE-critical");
+            if uid == AID_SYSTEM && is_de_critical {
+                info!("skip deletion of system key '{alias}' which is DE-critical");
                 continue;
             }
 
@@ -856,9 +855,9 @@ impl LegacyImporterState {
         Ok(())
     }
 
-    fn has_super_key(&mut self, user_id: u32) -> Result<bool> {
-        Ok(self.recently_imported_super_key.contains(&user_id)
-            || self.legacy_loader.has_super_key(user_id))
+    fn has_super_key(&mut self, user: AndroidUserId) -> Result<bool> {
+        Ok(self.recently_imported_super_key.contains(&user)
+            || self.legacy_loader.has_super_key(user))
     }
 
     fn check_empty(&self) -> u8 {

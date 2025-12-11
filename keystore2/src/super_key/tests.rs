@@ -18,8 +18,10 @@ use super::*;
 use crate::database::tests::make_bootlevel_key_entry;
 use crate::database::tests::make_test_key_entry;
 use crate::database::tests::new_test_db;
+use crate::utils::AppUid;
 use rand::prelude::*;
-const USER_ID: u32 = 0;
+const USER_ID: AndroidUserId = AndroidUserId(0);
+const UID: AppUid = AppUid(101);
 const TEST_KEY_ALIAS: &str = "TEST_KEY";
 const TEST_BOOT_KEY_ALIAS: &str = "TEST_BOOT_KEY";
 
@@ -51,13 +53,13 @@ fn assert_unlocked(
     skm: &Arc<RwLock<SuperKeyManager>>,
     keystore_db: &mut KeystoreDB,
     legacy_importer: &LegacyImporter,
-    user_id: u32,
+    user: AndroidUserId,
     err_msg: &str,
 ) {
     let user_state =
-        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user_id).unwrap();
+        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user).unwrap();
     match user_state {
-        UserState::AfterFirstUnlock(_) => {}
+        UserState::CeUnlocked(_) => {}
         _ => panic!("{}", err_msg),
     }
 }
@@ -66,14 +68,14 @@ fn assert_locked(
     skm: &Arc<RwLock<SuperKeyManager>>,
     keystore_db: &mut KeystoreDB,
     legacy_importer: &LegacyImporter,
-    user_id: u32,
+    user: AndroidUserId,
     err_msg: &str,
 ) {
     let user_state =
-        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user_id).unwrap();
+        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user).unwrap();
     match user_state {
-        UserState::BeforeFirstUnlock => {}
-        _ => panic!("{}", err_msg),
+        UserState::CeLocked => {}
+        _ => panic!("{err_msg}"),
     }
 }
 
@@ -81,11 +83,11 @@ fn assert_uninitialized(
     skm: &Arc<RwLock<SuperKeyManager>>,
     keystore_db: &mut KeystoreDB,
     legacy_importer: &LegacyImporter,
-    user_id: u32,
+    user: AndroidUserId,
     err_msg: &str,
 ) {
     let user_state =
-        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user_id).unwrap();
+        skm.write().unwrap().get_user_state(keystore_db, legacy_importer, user).unwrap();
     match user_state {
         UserState::Uninitialized => {}
         _ => panic!("{}", err_msg),
@@ -218,28 +220,19 @@ fn test_user_removal(locked: bool) {
         "The user was not unlocked after initialization!",
     );
 
-    assert!(make_test_key_entry(
-        &mut keystore_db,
-        Domain::APP,
-        USER_ID.into(),
-        TEST_KEY_ALIAS,
-        None
-    )
-    .is_ok());
+    assert!(make_test_key_entry(&mut keystore_db, Domain::APP, UID.0, TEST_KEY_ALIAS, None).is_ok());
     assert!(make_bootlevel_key_entry(
         &mut keystore_db,
         Domain::APP,
-        USER_ID.into(),
+        UID.0,
         TEST_BOOT_KEY_ALIAS,
         false
     )
     .is_ok());
 
+    assert!(keystore_db.key_exists(Domain::APP, UID.0, TEST_KEY_ALIAS, KeyType::Client).unwrap());
     assert!(keystore_db
-        .key_exists(Domain::APP, USER_ID.into(), TEST_KEY_ALIAS, KeyType::Client)
-        .unwrap());
-    assert!(keystore_db
-        .key_exists(Domain::APP, USER_ID.into(), TEST_BOOT_KEY_ALIAS, KeyType::Client)
+        .key_exists(Domain::APP, UID.0, TEST_BOOT_KEY_ALIAS, KeyType::Client)
         .unwrap());
 
     if locked {
@@ -268,11 +261,9 @@ fn test_user_removal(locked: bool) {
         .super_key_exists_in_db_for_user(&mut keystore_db, &legacy_importer, USER_ID)
         .unwrap());
 
+    assert!(!keystore_db.key_exists(Domain::APP, UID.0, TEST_KEY_ALIAS, KeyType::Client).unwrap());
     assert!(!keystore_db
-        .key_exists(Domain::APP, USER_ID.into(), TEST_KEY_ALIAS, KeyType::Client)
-        .unwrap());
-    assert!(!keystore_db
-        .key_exists(Domain::APP, USER_ID.into(), TEST_BOOT_KEY_ALIAS, KeyType::Client)
+        .key_exists(Domain::APP, UID.0, TEST_BOOT_KEY_ALIAS, KeyType::Client)
         .unwrap());
 }
 

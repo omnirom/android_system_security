@@ -46,6 +46,7 @@ use android_security_compat::aidl::android::security::compat::IKeystoreCompatSer
 use anyhow::{Context, Result};
 use binder::FromIBinder;
 use binder::{get_declared_instances, is_declared};
+use log::{error, info};
 use rustutils::system_properties::PropertyWatcher;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -71,20 +72,18 @@ pub fn create_thread_local_db() -> KeystoreDB {
     let mut db = match result {
         Ok(db) => db,
         Err(e) => {
-            log::error!("Failed to open Keystore database at {db_path:?}: {e:?}");
-            log::error!("Has /data been mounted correctly?");
+            error!("Failed to open Keystore database at {db_path:?}: {e:?}");
+            error!("Has /data been mounted correctly?");
             panic!("Failed to open database for Keystore, cannot continue: {e:?}")
         }
     };
 
     DB_INIT.call_once(|| {
-        log::info!("Touching Keystore 2.0 database for this first time since boot.");
-        log::info!("Calling cleanup leftovers.");
+        info!("Touching Keystore 2.0 database for this first time since boot.");
+        info!("Calling cleanup leftovers.");
         let n = db.cleanup_leftovers().expect("Failed to cleanup database on startup");
         if n != 0 {
-            log::info!(
-                "Cleaned up {n} failed entries, indicating keystore crash on key generation"
-            );
+            info!("Cleaned up {n} failed entries, indicating keystore crash on key generation");
         }
     });
     db
@@ -201,14 +200,14 @@ fn keymint_service_name(security_level: &SecurityLevel) -> Result<Option<String>
     let service_name = match *security_level {
         SecurityLevel::TRUSTED_ENVIRONMENT => {
             if keymint_instances.iter().any(|instance| *instance == "default") {
-                Some(format!("{}/default", keymint_descriptor))
+                Some(format!("{keymint_descriptor}/default"))
             } else {
                 None
             }
         }
         SecurityLevel::STRONGBOX => {
             if keymint_instances.iter().any(|instance| *instance == "strongbox") {
-                Some(format!("{}/strongbox", keymint_descriptor))
+                Some(format!("{keymint_descriptor}/strongbox"))
             } else {
                 None
             }
@@ -236,13 +235,13 @@ fn connect_keymint(
         .context(ks_err!("Get service name from binder service"))?;
 
     let (keymint, hal_version) = if let Some(service_name) = service_name {
+        // Allow a few retries for retrieving the /default KeyMint instance, as it is needed at
+        // startup and may also be starting up.  (However, note that a slow-starting /default
+        // KeyMint will result in extended boot times.)
+        let retry_count = if *security_level == SecurityLevel::TRUSTED_ENVIRONMENT { 6 } else { 1 };
         let km: Strong<dyn IKeyMintDevice> =
-            if SecurityLevel::TRUSTED_ENVIRONMENT == *security_level {
-                map_binder_status_code(retry_get_interface(&service_name))
-            } else {
-                map_binder_status_code(binder::get_interface(&service_name))
-            }
-            .context(ks_err!("Trying to connect to genuine KeyMint service."))?;
+            map_binder_status_code(retry_get_interface(&service_name, retry_count))
+                .context(ks_err!("Trying to connect to genuine KeyMint service."))?;
         // Map the HAL version code for KeyMint to be <AIDL version> * 100, so
         // - V1 is 100
         // - V2 is 200
@@ -279,19 +278,15 @@ fn connect_keymint(
     let keymint = match hal_version {
         Some(400) | Some(300) | Some(200) => {
             // KeyMint v2+: use as-is (we don't have any software emulation of v3 or v4-specific KeyMint features).
-            log::info!(
-                "KeyMint device is current version ({:?}) for security level: {:?}",
-                hal_version,
-                security_level
+            info!(
+                "KeyMint device is current version ({hal_version:?}) for security level: {security_level:?}",
             );
             keymint
         }
         Some(100) => {
             // KeyMint v1: perform software emulation.
-            log::info!(
-                "Add emulation wrapper around {:?} device for security level: {:?}",
-                hal_version,
-                security_level
+            info!(
+                "Add emulation wrapper around {hal_version:?} device for security level: {security_level:?}",
             );
             BacklevelKeyMintWrapper::wrap(KeyMintV1::new(*security_level), keymint)
                 .context(ks_err!("Trying to create V1 compatibility wrapper."))?
@@ -300,18 +295,15 @@ fn connect_keymint(
             // Compatibility wrapper around a KeyMaster device: this roughly
             // behaves like KeyMint V1 (e.g. it includes AGREE_KEY support,
             // albeit in software.)
-            log::info!(
-                "Add emulation wrapper around Keymaster device for security level: {:?}",
-                security_level
+            info!(
+                "Add emulation wrapper around Keymaster device for security level: {security_level:?}",
             );
             BacklevelKeyMintWrapper::wrap(KeyMintV1::new(*security_level), keymint)
                 .context(ks_err!("Trying to create km_compat V1 compatibility wrapper ."))?
         }
         _ => {
             return Err(Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE)).context(ks_err!(
-                "unexpected hal_version {:?} for security level: {:?}",
-                hal_version,
-                security_level
+                "unexpected hal_version {hal_version:?} for {security_level:?}",
             ));
         }
     };
@@ -386,7 +378,7 @@ fn connect_secureclock() -> Result<Strong<dyn ISecureClock>> {
     let secure_clock_available =
         secureclock_instances.iter().any(|instance| *instance == "default");
 
-    let default_time_stamp_service_name = format!("{}/default", secure_clock_descriptor);
+    let default_time_stamp_service_name = format!("{secure_clock_descriptor}/default");
 
     let secureclock = if secure_clock_available {
         map_binder_status_code(binder::get_interface(&default_time_stamp_service_name))
@@ -433,7 +425,7 @@ pub fn get_remotely_provisioned_component_name(security_level: &SecurityLevel) -
 
     match *security_level {
         SecurityLevel::TRUSTED_ENVIRONMENT => {
-            let instance = format!("{}/default", remote_prov_descriptor);
+            let instance = format!("{remote_prov_descriptor}/default");
             if is_declared(&instance)? {
                 Some(instance)
             } else {
@@ -441,7 +433,7 @@ pub fn get_remotely_provisioned_component_name(security_level: &SecurityLevel) -
             }
         }
         SecurityLevel::STRONGBOX => {
-            let instance = format!("{}/strongbox", remote_prov_descriptor);
+            let instance = format!("{remote_prov_descriptor}/strongbox");
             if is_declared(&instance)? {
                 Some(instance)
             } else {
@@ -471,14 +463,14 @@ pub fn await_boot_completed() {
     // boots, which on a very slow device (e.g., emulator for a non-native architecture) can
     // take minutes. Blocking here would be unexpected only if it never finishes.
     let _wp = wd::watch_millis("await_boot_completed", 300_000);
-    log::info!("monitoring for sys.boot_completed=1");
+    info!("monitoring for sys.boot_completed=1");
     while let Err(e) = watch_for_boot_completed() {
-        log::error!("failed to watch for boot_completed: {e:?}");
+        error!("failed to watch for boot_completed: {e:?}");
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
     BOOT_COMPLETED.store(true, Ordering::Release);
-    log::info!("wait_for_boot_completed done, triggering GC");
+    info!("wait_for_boot_completed done, triggering GC");
 
     // Garbage collection may have been skipped until now, so trigger a check.
     GC.notify_gc();

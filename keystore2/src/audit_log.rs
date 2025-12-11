@@ -20,6 +20,7 @@ use android_system_keystore2::aidl::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor,
 };
 use libc::uid_t;
+use log::info;
 use structured_log::{structured_log, LOG_ID_SECURITY};
 
 const TAG_KEY_GENERATED: u32 = 210024;
@@ -35,7 +36,7 @@ fn key_owner(domain: Domain, nspace: i64, uid: i32) -> i32 {
         Domain::APP => uid,
         Domain::SELINUX => (nspace | FLAG_NAMESPACE) as i32,
         d => {
-            log::info!("Not logging audit event for key with domain {d:?}");
+            info!("Not logging audit event for key with domain {d:?}");
             0
         }
     }

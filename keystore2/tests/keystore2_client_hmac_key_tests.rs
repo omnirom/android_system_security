@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::keystore2_client_test_utils::perform_sample_sign_operation;
+use crate::keystore2_client_test_utils::{delete_app_key, perform_sample_sign_operation};
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Algorithm::Algorithm, Digest::Digest, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
 };
@@ -73,6 +73,7 @@ fn keystore2_hmac_key_op_success() {
             Ok(()),
             create_hmac_key_and_operation(&sl, &alias, key_size, mac_len, min_mac_len, digest,)
         );
+        delete_app_key(&sl.keystore2, &alias).unwrap();
     }
 }
 
@@ -86,7 +87,7 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_key_size() {
     let sl = SecLevel::tee();
 
     for key_size in 0..513 {
-        let alias = format!("ks_hmac_test_key_{}", key_size);
+        let alias = format!("ks_hmac_test_key_{key_size}");
         let result = key_generations::map_ks_error(key_generations::generate_hmac_key(
             &sl,
             &alias,
@@ -97,11 +98,12 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_key_size() {
 
         match result {
             Ok(_) => {
+                delete_app_key(&sl.keystore2, &alias).unwrap();
                 assert!((key_size >= 64 && key_size % 8 == 0));
             }
             Err(e) => {
                 assert_eq!(e, Error::Km(ErrorCode::UNSUPPORTED_KEY_SIZE));
-                assert!((key_size < 64 || key_size % 8 != 0), "Unsupported KeySize: {}", key_size);
+                assert!((key_size < 64 || key_size % 8 != 0), "Unsupported KeySize: {key_size}");
             }
         }
     }
@@ -117,7 +119,7 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_min_mac_length() {
     let sl = SecLevel::tee();
 
     for min_mac_len in 0..257 {
-        let alias = format!("ks_hmac_test_key_mml_{}", min_mac_len);
+        let alias = format!("ks_hmac_test_key_mml_{min_mac_len}");
         match key_generations::map_ks_error(key_generations::generate_hmac_key(
             &sl,
             &alias,
@@ -126,14 +128,14 @@ fn keystore2_hmac_gen_keys_fails_expect_unsupported_min_mac_length() {
             digest,
         )) {
             Ok(_) => {
+                delete_app_key(&sl.keystore2, &alias).unwrap();
                 assert!((min_mac_len >= 64 && min_mac_len % 8 == 0));
             }
             Err(e) => {
                 assert_eq!(e, Error::Km(ErrorCode::UNSUPPORTED_MIN_MAC_LENGTH));
                 assert!(
                     (min_mac_len < 64 || min_mac_len % 8 != 0),
-                    "Unsupported MinMacLength: {}",
-                    min_mac_len
+                    "Unsupported MinMacLength: {min_mac_len}"
                 );
             }
         }
@@ -251,6 +253,7 @@ fn keystore2_hmac_key_op_with_mac_len_greater_than_digest_len_fail() {
 
         assert!(result.is_err());
         assert_eq!(Error::Km(ErrorCode::UNSUPPORTED_MAC_LENGTH), result.unwrap_err());
+        delete_app_key(&sl.keystore2, &alias).unwrap();
     }
 }
 
@@ -281,5 +284,6 @@ fn keystore2_hmac_key_op_with_mac_len_less_than_min_mac_len_fail() {
 
         assert!(result.is_err());
         assert_eq!(Error::Km(ErrorCode::INVALID_MAC_LENGTH), result.unwrap_err());
+        delete_app_key(&sl.keystore2, &alias).unwrap();
     }
 }

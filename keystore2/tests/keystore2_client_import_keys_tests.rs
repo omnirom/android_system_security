@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::keystore2_client_test_utils::{
-    encrypt_secure_key, encrypt_transport_key, get_vsr_api_level,
+    delete_app_key, encrypt_secure_key, encrypt_transport_key, get_vsr_api_level,
     perform_sample_asym_sign_verify_op, perform_sample_hmac_sign_verify_op,
     perform_sample_sym_key_decrypt_op, perform_sample_sym_key_encrypt_op, SAMPLE_PLAIN_TEXT,
 };
@@ -147,9 +147,11 @@ fn keystore2_rsa_import_key_success() {
         &sl,
         Domain::APP,
         -1,
-        Some(alias),
+        Some(alias.clone()),
         import_params,
     );
+
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// Import RSA key without providing key-size and public exponent in import key parameters list.
@@ -177,9 +179,10 @@ fn keystore2_rsa_import_key_determine_key_size_and_pub_exponent() {
         &sl,
         Domain::APP,
         -1,
-        Some(alias),
+        Some(alias.clone()),
         import_params,
     );
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// Try to import RSA key with wrong key size as import-key-parameter. Test should fail to import
@@ -315,11 +318,17 @@ fn keystore2_import_ec_key_success() {
         .cert_not_before(0)
         .cert_not_after(253402300799000);
 
-    let key_metadata =
-        key_generations::import_ec_p_256_key(&sl, Domain::APP, -1, Some(alias), import_params)
-            .expect("Failed to import EC key.");
+    let key_metadata = key_generations::import_ec_p_256_key(
+        &sl,
+        Domain::APP,
+        -1,
+        Some(alias.clone()),
+        import_params,
+    )
+    .expect("Failed to import EC key.");
 
     perform_sample_asym_sign_verify_op(&sl.binder, &key_metadata, None, Some(Digest::SHA_2_256));
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// Try to import EC key with wrong ec-curve as import-key-parameter. Test should fail to import a
@@ -358,10 +367,11 @@ fn keystore2_import_aes_key_success() {
     let sl = SecLevel::tee();
 
     let alias = format!("ks_aes_key_test_import_1_{}{}", getuid(), 256);
-    let key_metadata = key_generations::import_aes_key(&sl, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_aes_key(&sl, Domain::APP, -1, Some(alias.clone()))
         .expect("Failed to import AES key.");
 
     perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// Import 3DES key and verify key parameters. Try to create an operation using the imported key.
@@ -372,10 +382,11 @@ fn keystore2_import_3des_key_success() {
 
     let alias = format!("ks_3des_key_test_import_1_{}{}", getuid(), 168);
 
-    let key_metadata = key_generations::import_3des_key(&sl, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_3des_key(&sl, Domain::APP, -1, Some(alias.clone()))
         .expect("Failed to import 3DES key.");
 
     perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// Import HMAC key and verify key parameters. Try to create an operation using the imported key.
@@ -386,10 +397,11 @@ fn keystore2_import_hmac_key_success() {
 
     let alias = format!("ks_hmac_key_test_import_1_{}", getuid());
 
-    let key_metadata = key_generations::import_hmac_key(&sl, Domain::APP, -1, Some(alias))
+    let key_metadata = key_generations::import_hmac_key(&sl, Domain::APP, -1, Some(alias.clone()))
         .expect("Failed to import HMAC key.");
 
     perform_sample_hmac_sign_verify_op(&sl.binder, &key_metadata.key);
+    delete_app_key(&sl.keystore2, &alias).unwrap();
 }
 
 /// This test creates a wrapped key data and imports it. Validates the imported wrapped key.
@@ -415,7 +427,7 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
     let wrapping_key_metadata = key_generations::import_wrapping_key(
         &sl,
         key_generations::RSA_2048_KEY,
-        Some(wrapping_key_alias),
+        Some(wrapping_key_alias.clone()),
     )
     .unwrap();
 
@@ -438,13 +450,15 @@ fn keystore2_create_wrapped_key_and_import_wrapped_key_success() {
     let secured_key_alias = format!("ks_wrapped_aes_key_{}", getuid());
     let secured_key_metadata = key_generations::import_wrapped_key(
         &sl,
-        Some(secured_key_alias),
+        Some(secured_key_alias.clone()),
         &wrapping_key_metadata,
         Some(wrapped_key_data.to_vec()),
     )
     .unwrap();
 
     perform_sym_key_encrypt_decrypt_op(&sl.binder, &secured_key_metadata);
+    delete_app_key(&sl.keystore2, &secured_key_alias).unwrap();
+    delete_app_key(&sl.keystore2, &wrapping_key_alias).unwrap();
 }
 
 /// Create a wrapped key data with invalid Additional Authenticated Data (AAD) and
@@ -471,7 +485,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
     let wrapping_key_metadata = key_generations::import_wrapping_key(
         &sl,
         key_generations::RSA_2048_KEY,
-        Some(wrapping_key_alias),
+        Some(wrapping_key_alias.clone()),
     )
     .unwrap();
 
@@ -500,6 +514,7 @@ fn keystore2_create_wrapped_key_with_invalid_aad_and_import_wrapped_key_fail() {
 
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::VERIFICATION_FAILED), result.unwrap_err());
+    delete_app_key(&sl.keystore2, &wrapping_key_alias).unwrap();
 }
 
 /// Import wrapped AES key and use it for crypto operations. Test should import wrapped key and
@@ -528,14 +543,16 @@ fn keystore2_import_wrapped_key_success() {
         &sl,
         Domain::APP,
         -1,
-        Some(alias),
-        Some(wrapping_key_alias),
+        Some(alias.clone()),
+        Some(wrapping_key_alias.clone()),
         wrapping_key_params,
     )
     .expect("Failed to import wrapped key.");
 
     // Try to perform operations using wrapped key.
     perform_sym_key_encrypt_decrypt_op(&sl.binder, &key_metadata);
+    delete_app_key(&sl.keystore2, &alias).unwrap();
+    delete_app_key(&sl.keystore2, &wrapping_key_alias).unwrap();
 }
 
 /// Import wrapping-key without specifying KeyPurpose::WRAP_KEY in import key parameters. Try to
@@ -568,12 +585,13 @@ fn keystore2_import_wrapped_key_fails_with_wrong_purpose() {
             Domain::APP,
             -1,
             Some(alias),
-            Some(wrapping_key_alias),
+            Some(wrapping_key_alias.clone()),
             wrapping_key_params,
         ));
 
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INCOMPATIBLE_PURPOSE), result.unwrap_err());
+    delete_app_key(&sl.keystore2, &wrapping_key_alias).unwrap();
 }
 
 /// Try to import wrapped key whose wrapping key is missing in Android Keystore.

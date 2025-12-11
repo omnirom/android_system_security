@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::skip_if_no_hw_curve25519_support;
 use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
     Digest::Digest, EcCurve::EcCurve, ErrorCode::ErrorCode, KeyPurpose::KeyPurpose,
 };
@@ -105,6 +106,7 @@ fn perform_ec_key_agreement(ec_curve: EcCurve) {
     let local_pub_key = local_key.public_key_to_der().unwrap();
 
     check_agreement(&sl.binder, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
+    sl.keystore2.deleteKey(&keymint_key.key).unwrap();
 }
 
 test_ec_key_agree!(test_ec_p224_key_agreement, EcCurve::P_224);
@@ -117,6 +119,7 @@ test_ec_key_agree!(test_ec_p521_key_agreement, EcCurve::P_521);
 #[test]
 fn keystore2_ec_25519_agree_key_success() {
     let sl = SecLevel::tee();
+    skip_if_no_hw_curve25519_support!(sl);
 
     let alias = format!("ks_ec_25519_test_key_agree_{}", getuid());
     let keymint_key = key_generations::generate_ec_agree_key(
@@ -135,6 +138,7 @@ fn keystore2_ec_25519_agree_key_success() {
     let local_pub_key = local_key.public_key_to_der().unwrap();
 
     check_agreement(&sl.binder, &keymint_key.key, &keymint_pub_key, &local_key, &local_pub_key);
+    sl.keystore2.deleteKey(&keymint_key.key).unwrap();
 }
 
 /// Generate two EC keys with different curves and try to perform local ECDH. Since keys are using
@@ -142,6 +146,7 @@ fn keystore2_ec_25519_agree_key_success() {
 #[test]
 fn keystore2_ec_agree_key_with_different_curves_fail() {
     let sl = SecLevel::tee();
+    skip_if_no_hw_curve25519_support!(sl);
 
     let alias = format!("ks_test_key_agree_fail{}", getuid());
     let keymint_key = key_generations::generate_ec_agree_key(
@@ -167,4 +172,5 @@ fn keystore2_ec_agree_key_with_different_curves_fail() {
     let result = key_generations::map_ks_error(op.finish(Some(&local_pub_key), None));
     assert!(result.is_err());
     assert_eq!(Error::Km(ErrorCode::INVALID_ARGUMENT), result.unwrap_err());
+    sl.keystore2.deleteKey(&keymint_key.key).unwrap();
 }

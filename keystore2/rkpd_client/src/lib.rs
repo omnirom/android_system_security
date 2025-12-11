@@ -25,6 +25,7 @@ use android_security_rkp_aidl::aidl::android::security::rkp::{
 };
 use anyhow::{Context, Result};
 use binder::{BinderFeatures, Interface, StatusCode, Strong};
+use log::{error, warn};
 use message_macro::source_location_msg;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -94,7 +95,7 @@ impl<T> SafeSender<T> {
             // It's possible for the corresponding receiver to time out and be dropped. In this
             // case send() will fail. This error is not actionable though, so only log the error.
             if inner.send(value).is_err() {
-                log::error!("SafeSender::send() failed");
+                error!("SafeSender::send() failed");
             }
         }
     }
@@ -122,7 +123,7 @@ impl IGetRegistrationCallback for GetRegistrationCallback {
         Ok(())
     }
     fn onCancel(&self) -> binder::Result<()> {
-        log::warn!("IGetRegistrationCallback cancelled");
+        warn!("IGetRegistrationCallback cancelled");
         self.registration_tx.send(
             Err(Error::RequestCancelled)
                 .context(source_location_msg!("GetRegistrationCallback cancelled.")),
@@ -130,7 +131,7 @@ impl IGetRegistrationCallback for GetRegistrationCallback {
         Ok(())
     }
     fn onError(&self, description: &str) -> binder::Result<()> {
-        log::error!("IGetRegistrationCallback failed: '{description}'");
+        error!("IGetRegistrationCallback failed: '{description}'");
         self.registration_tx.send(
             Err(Error::GetRegistrationFailed)
                 .context(source_location_msg!("GetRegistrationCallback failed: {:?}", description)),
@@ -183,14 +184,14 @@ impl IGetKeyCallback for GetKeyCallback {
         Ok(())
     }
     fn onCancel(&self) -> binder::Result<()> {
-        log::warn!("IGetKeyCallback cancelled");
+        warn!("IGetKeyCallback cancelled");
         self.key_tx.send(
             Err(Error::RequestCancelled).context(source_location_msg!("GetKeyCallback cancelled.")),
         );
         Ok(())
     }
     fn onError(&self, error: GetKeyErrorCode, description: &str) -> binder::Result<()> {
-        log::error!("IGetKeyCallback failed: {description}");
+        error!("IGetKeyCallback failed: {description}");
         self.key_tx.send(Err(Error::GetKeyFailed(error)).context(source_location_msg!(
             "GetKeyCallback failed: {:?} {:?}",
             error,
@@ -215,7 +216,7 @@ async fn get_rkpd_attestation_key_from_registration_async(
         Err(e) => {
             // Make a best effort attempt to cancel the timed out request.
             if let Err(e) = registration.cancelGetKey(&cb) {
-                log::error!("IRegistration::cancelGetKey failed: {:?}", e);
+                error!("IRegistration::cancelGetKey failed: {e:?}");
             }
             Err(Error::RetryableTimeout)
                 .context(source_location_msg!("Waiting for RKPD key timed out: {:?}", e))
@@ -256,7 +257,7 @@ impl IStoreUpgradedKeyCallback for StoreUpgradedKeyCallback {
     }
 
     fn onError(&self, error: &str) -> binder::Result<()> {
-        log::error!("IStoreUpgradedKeyCallback failed: {error}");
+        error!("IStoreUpgradedKeyCallback failed: {error}");
         self.completer.send(
             Err(Error::StoreUpgradedKeyFailed)
                 .context(source_location_msg!("Failed to store upgraded key: {:?}", error)),

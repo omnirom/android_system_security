@@ -52,6 +52,7 @@ fn keystore2_update_subcomponent_success() {
     let key_entry_response = sl.keystore2.getKeyEntry(&key_metadata.key).unwrap();
     assert_eq!(Some(other_cert.to_vec()), key_entry_response.metadata.certificate);
     assert_eq!(Some(other_cert_chain.to_vec()), key_entry_response.metadata.certificateChain);
+    sl.keystore2.deleteKey(&key_metadata.key).unwrap();
 }
 
 /// Try to update non-existing asymmetric key public cert and certificate chain. Test should fail
